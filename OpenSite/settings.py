@@ -92,7 +92,7 @@ DATABASES = {
         'ENGINE'  : 'django.db.backends.mysql',
         'NAME'    : 'openbench',
         'USER'    : 'openbench',
-        'PASSWORD': 'kWmFxh2AWrvV9hM2shH',
+        'PASSWORD': '',
         'HOST'    : '127.0.0.1',
         'PORT'    : '3306',
     }
