@@ -564,6 +564,8 @@ def update_test(request, machine):
         test.WW     += WW
         test.games  += games  # Overall
 
+        test.update_games_rate(games, timezone.now())
+
         # Consider only Crashes or Illegal moves as real errors
         test.error = bool(test.error or crashes or illegals)
 

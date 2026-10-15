@@ -20,6 +20,7 @@
 
 import hashlib
 import json
+import math
 
 from django.db.models import CharField, IntegerField, BigIntegerField, BooleanField, FloatField
 from django.db.models import JSONField, ForeignKey, DateTimeField, OneToOneField
@@ -268,8 +269,43 @@ class Test(Model):
     creation    = DateTimeField(auto_now_add=True)
     updated     = DateTimeField(auto_now=True)
 
+    # Exponentially decayed games and seconds, to estimate the recent throughput
+    rate_games   = FloatField(default=0.0)
+    rate_time    = FloatField(default=0.0)
+    rate_updated = DateTimeField(null=True, blank=True)
+
+    RATE_WINDOW     = 3600 # Time constant of the decay, in seconds
+    RATE_MIN_WINDOW = 300  # Observed seconds required before reporting a rate
+
     def __str__(self):
         return '{0} vs {1} @ {2}'.format(self.dev.name, self.base.name, self.dev_time_control)
+
+    def update_games_rate(self, games, now):
+
+        # The first report only starts the clock, since its games were played over an unknown interval
+        if self.rate_updated is None:
+            self.rate_games = self.rate_time = 0.0
+
+        else:
+            decay = math.exp(-max(0.0, (now - self.rate_updated).total_seconds()) / self.RATE_WINDOW)
+            self.rate_games = self.rate_games * decay + games
+            self.rate_time  = self.rate_time  * decay + self.RATE_WINDOW * (1.0 - decay)
+
+        self.rate_updated = now
+
+    def games_per_minute(self, now):
+
+        if self.rate_updated is None or self.rate_time < self.RATE_MIN_WINDOW:
+            return None
+
+        games, time = self.rate_games, self.rate_time
+
+        # Running workloads decay towards zero while no results arrive. Finished ones stay frozen
+        if not self.finished:
+            decay = math.exp(-max(0.0, (now - self.rate_updated).total_seconds()) / self.RATE_WINDOW)
+            games, time = games * decay, time * decay + self.RATE_WINDOW * (1.0 - decay)
+
+        return 60.0 * games / time
 
     def results(self):
         return self.as_tri() if self.use_tri else self.as_penta()

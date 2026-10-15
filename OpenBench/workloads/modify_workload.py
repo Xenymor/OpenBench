@@ -72,6 +72,7 @@ def approve_workload(request, profile, workload):
 
 def restart_workload(request, profile, workload):
     workload.finished = False;
+    workload.rate_updated = None # Time spent stopped should not count towards the throughput
     return 'Workload was Restarted!'
 
 def stop_workload(request, profile, workload):

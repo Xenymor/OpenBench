@@ -19,6 +19,7 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 import django
+import django.utils.timezone
 import re
 
 import OpenBench.config
@@ -87,6 +88,9 @@ def shortStatBlock(test):
         lower, elo, upper = OpenBench.stats.Elo(test.results())
         elo_line = 'Elo: %0.2f +- %0.2f (95%%) [N=%d]' % (elo, max(upper - elo, elo - lower), test.max_games)
         statlines = [status_line, elo_line, penta_line] if test.use_penta else [status_line, elo_line, tri_line]
+
+    gpm = test.games_per_minute(django.utils.timezone.now())
+    statlines.append('Speed: %s' % ('-' if gpm is None else '%0.1f games/min' % (gpm)))
 
     return '\n'.join(statlines)
 
