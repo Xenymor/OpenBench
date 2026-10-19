@@ -15,6 +15,8 @@
     <script>
         document.addEventListener(
             'DOMContentLoaded', function () {
+                toggle_followup('followup');
+                toggle_followup('ltc');
                 change_engine('{{ profile.engine }}', 'dev', '{{workload}}');
                 enforce_default_text('dev_repo', 'https://github.com/');
                 enforce_default_text('base_repo', 'https://github.com/');
@@ -187,6 +189,43 @@
                         <label for="spsa_pairs_per"> Pairs-Per </label> <input value="8" id="spsa_pairs_per" name="spsa_pairs_per">
                     </div>
 
+                    <h3> Follow-up SPRT </h3>
+
+                    <div class="row">
+                        <label for="followup_enabled"> Enabled </label>
+                        <select onchange="toggle_followup('followup')" id="followup_enabled" name="followup_enabled">
+                            <option selected value="NO"> No </option>
+                            <option value="YES"> Yes </option>
+                        </select>
+                    </div>
+                    <div id="followup_settings">
+                        <div class="row">
+                            <label for="followup_branch"> Base Branch </label> <input value="main" id="followup_branch" name="followup_branch">
+                        </div>
+                        <div class="row">
+                            <label for="followup_bench"> Base Bench </label> <input value="Autofill" id="followup_bench" name="followup_bench">
+                        </div>
+                        <div class="row">
+                            <label for="followup_bounds"> Bounds </label> <input value="[0.00, 3.00]" id="followup_bounds" name="followup_bounds">
+                        </div>
+                        <div class="row">
+                            <label for="followup_confidence"> Confidence </label> <input value="[0.05, 0.05]" id="followup_confidence" name="followup_confidence">
+                        </div>
+                        <div class="row">
+                            <label for="followup_time_control"> Time Control </label> <input value="10.0+0.1" id="followup_time_control" name="followup_time_control">
+                        </div>
+                        <div class="row">
+                            <label for="followup_at_percent"> Start at % </label> <input value="100" id="followup_at_percent" name="followup_at_percent">
+                        </div>
+                        <div class="row">
+                            <label for="followup_auto_approve"> Auto-Approve </label>
+                            <select id="followup_auto_approve" name="followup_auto_approve">
+                                <option selected value="NO"> No </option>
+                                <option value="YES"> Yes </option>
+                            </select>
+                        </div>
+                    </div>
+
                 {% elif workload == "DATAGEN" %}
 
                     <h3> Datagen Settings </h3>
@@ -205,6 +244,42 @@
                             <option value="YES"> Yes </option>
                             <option selected value="NO"> No </option>
                         </select>
+                    </div>
+
+                {% endif %}
+
+                {% if workload == "TEST" or workload == "TUNE" %}
+
+                    <!-- For a TEST, started once the SPRT passes. For a TUNE, chained onto its Follow-up SPRT -->
+                    <h3> LTC Follow-up </h3>
+
+                    <div class="row">
+                        <label for="ltc_enabled"> Enabled </label>
+                        <select onchange="toggle_followup('ltc')" id="ltc_enabled" name="ltc_enabled">
+                            <option selected value="NO"> No </option>
+                            <option value="YES"> Yes </option>
+                        </select>
+                    </div>
+                    <div id="ltc_settings">
+                        <div class="row">
+                            <label for="ltc_time_control"> Time Control </label> <input value="60.0+0.6" id="ltc_time_control" name="ltc_time_control">
+                        </div>
+                        <div class="row">
+                            <label for="ltc_options"> Options </label> <input value="" placeholder="Same as STC" id="ltc_options" name="ltc_options">
+                        </div>
+                        <div class="row">
+                            <label for="ltc_bounds"> Bounds </label> <input value="[0.00, 3.00]" id="ltc_bounds" name="ltc_bounds">
+                        </div>
+                        <div class="row">
+                            <label for="ltc_confidence"> Confidence </label> <input value="[0.05, 0.05]" id="ltc_confidence" name="ltc_confidence">
+                        </div>
+                        <div class="row">
+                            <label for="ltc_auto_approve"> Auto-Approve </label>
+                            <select id="ltc_auto_approve" name="ltc_auto_approve">
+                                <option selected value="NO"> No </option>
+                                <option value="YES"> Yes </option>
+                            </select>
+                        </div>
                     </div>
 
                 {% endif %}

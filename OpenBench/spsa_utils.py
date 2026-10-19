@@ -186,3 +186,12 @@ def spsa_workload_assignment_dict(workload, runner_count):
             'r'     : float(r_values[i]),
         } for i, name in enumerate(names)
     }
+
+def spsa_tuned_options(workload):
+
+    # Current values as UCI options, the same names the Client already passes during the tune.
+    # Values are formatted as in spsa_optimal_values(), so the follow-up tests exactly those.
+    return ' '.join([
+        '%s=%s' % (param.name, param.value if param.is_float else int(round(param.value)))
+        for param in workload.spsa_run.parameters.order_by('index')
+    ])

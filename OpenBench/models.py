@@ -200,7 +200,7 @@ class Test(Model):
     dev              = ForeignKey('Engine', PROTECT, related_name='dev')
     dev_repo         = CharField(max_length=1024)
     dev_engine       = CharField(max_length=64)
-    dev_options      = CharField(max_length=256)
+    dev_options      = CharField(max_length=2048)
     dev_network      = CharField(max_length=256, blank=True)
     dev_netname      = CharField(max_length=256, blank=True)
     dev_time_control = CharField(max_length=32)
@@ -209,7 +209,7 @@ class Test(Model):
     base              = ForeignKey('Engine', PROTECT, related_name='base')
     base_repo         = CharField(max_length=1024)
     base_engine       = CharField(max_length=64)
-    base_options      = CharField(max_length=256)
+    base_options      = CharField(max_length=2048)
     base_network      = CharField(max_length=256, blank=True)
     base_netname      = CharField(max_length=256, blank=True)
     base_time_control = CharField(max_length=32)
@@ -241,6 +241,8 @@ class Test(Model):
     max_games     = IntegerField(default=0) # GAMES or DATAGEN
     genfens_args  = CharField(max_length=256, default='', blank=True) # DATAGEN
     play_reverses = BooleanField(default=False) # DATAGEN
+    followup      = JSONField(default=None, null=True, blank=True) # SPRT or SPSA, settings for an automatic follow-up SPRT
+    followup_test = IntegerField(default=0) # SPRT or SPSA, Id of the follow-up SPRT once it was created
 
     # Collection of all individual Result() objects
     games  = IntegerField(default=0) # Overall

@@ -29,7 +29,7 @@
 #   >>> errors, (dev_info, base_info) = verify_workload(request, 'TEST')
 #
 # For Verifying and Collection information on a Tune:
-#   >>> errors, dev_info = verify_workload(request, 'TUNE')
+#   >>> errors, (dev_info, followup_info) = verify_workload(request, 'TUNE')
 #
 # For Verifying and Collection information on Datagen:
 #   >>> errors, (dev_info, base_info) = verify_workload(request, 'DATAGEN')
@@ -39,7 +39,10 @@ import re
 import requests
 import traceback
 
+from types import SimpleNamespace
+
 import OpenBench.config
+import OpenBench.followup_utils
 import OpenBench.utils
 
 from OpenBench.models import *
@@ -58,8 +61,9 @@ def verify_workload(request, workload_type):
 
     if workload_type == 'TUNE':
         verify_tune_creation(errors, request)
-        engine = collect_github_info(errors, request, 'dev')
-        return errors, engine
+        engine   = collect_github_info(errors, request, 'dev')
+        followup = collect_followup_info(errors, request)
+        return errors, (engine, followup)
 
     if workload_type == 'DATAGEN':
         verify_datagen_creation(errors, request)
@@ -118,6 +122,10 @@ def verify_test_creation(errors, request):
     for verification in verifications:
         verification[0](errors, request, *verification[1:])
 
+    if request.POST.get('test_mode') == 'SPRT':
+        verify_ltc_creation(errors, request)
+        verify_followup_options_length(errors, request, ['dev_options', 'base_options'], '')
+
 def verify_tune_creation(errors, request):
 
     verifications = [
@@ -169,6 +177,39 @@ def verify_tune_creation(errors, request):
 
     for verification in verifications:
         verification[0](errors, request, *verification[1:])
+
+    verify_followup_creation(errors, request)
+
+    # The LTC follow-up of a tune is chained onto its SPRT follow-up
+    if request.POST.get('ltc_enabled', 'NO') == 'YES' and request.POST.get('followup_enabled', 'NO') != 'YES':
+        errors.append('LTC follow-up requires the SPRT follow-up')
+    else:
+        verify_ltc_creation(errors, request)
+
+    if request.POST.get('followup_enabled', 'NO') == 'YES':
+        verify_followup_options_length(errors, request, ['dev_options'], estimate_tuned_options(request))
+
+def verify_followup_creation(errors, request):
+
+    if request.POST.get('followup_enabled', 'NO') != 'YES':
+        return
+
+    verify_bounds_pair(errors, request, 'followup_bounds', 'Follow-up SPRT Bounds')
+    verify_conf_pair(errors, request, 'followup_confidence', 'Follow-up Confidence')
+    verify_time_control(errors, request, 'followup_time_control', 'Follow-up Time Control')
+
+    try: assert 0.00 < float(request.POST['followup_at_percent']) <= 100.00
+    except: errors.append('Follow-up "Start at %" must be within (0, 100]')
+
+def verify_ltc_creation(errors, request):
+
+    if request.POST.get('ltc_enabled', 'NO') != 'YES':
+        return
+
+    verify_bounds_pair(errors, request, 'ltc_bounds', 'LTC Bounds')
+    verify_conf_pair(errors, request, 'ltc_confidence', 'LTC Confidence')
+    verify_time_control(errors, request, 'ltc_time_control', 'LTC Time Control')
+    verify_option_overrides(errors, request, 'ltc_options', 'LTC Options')
 
 def verify_datagen_creation(errors, request):
 
@@ -277,21 +318,68 @@ def verify_test_mode(errors, request, field):
     except: errors.append('Unknown Test Mode')
 
 def verify_sprt_bounds(errors, request, field):
-    try:
-        if request.POST['test_mode'] != 'SPRT': return
-        pattern = r'^\[(-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)\]$'
-        match   = re.match(pattern, request.POST['test_bounds'])
-        assert float(match.group(1)) < float(match.group(2))
-    except: errors.append('SPRT Bounds must be formatted as [float1, float2]')
+    if request.POST.get('test_mode') == 'SPRT':
+        verify_bounds_pair(errors, request, 'test_bounds', 'SPRT Bounds')
 
 def verify_sprt_conf(errors, request, field):
+    if request.POST.get('test_mode') == 'SPRT':
+        verify_conf_pair(errors, request, 'test_confidence', 'Confidence Bounds')
+
+# [float1, float2], as used by the SPRT Bounds and Confidence fields
+FLOAT_PAIR_PATTERN = r'^\[(-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)\]$'
+
+def verify_bounds_pair(errors, request, field, field_name):
     try:
-        if request.POST['test_mode'] != 'SPRT': return
-        pattern = r'^\[(-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)\]$'
-        match   = re.match(pattern, request.POST['test_confidence'])
+        match = re.match(FLOAT_PAIR_PATTERN, request.POST[field])
+        assert float(match.group(1)) < float(match.group(2))
+    except: errors.append('%s must be formatted as [float1, float2]' % (field_name))
+
+def verify_conf_pair(errors, request, field, field_name):
+    try:
+        match = re.match(FLOAT_PAIR_PATTERN, request.POST[field])
         assert 0.00 < float(match.group(1)) < 1.00
         assert 0.00 < float(match.group(2)) < 1.00
-    except: errors.append('Confidence Bounds must be formatted as [float1, float2], within (0.00, 1.00)')
+    except: errors.append('%s must be formatted as [float1, float2], within (0.00, 1.00)' % (field_name))
+
+def verify_option_overrides(errors, request, field, field_name):
+    try:
+        overrides = request.POST.get(field, '')
+
+        # Nothing but Name=Value pairs may be given
+        assert not OpenBench.followup_utils.OPTION_PATTERN.sub('', overrides).strip()
+
+        # Threads and Hash are optional here, but must still be sane when given
+        for option in ['Threads', 'Hash']:
+            if (value := OpenBench.utils.extract_option(overrides, option)) is not None:
+                assert int(value) >= 1
+
+    except: errors.append('%s must be Name=Value pairs, with Threads and Hash at least 1' % (field_name))
+
+def estimate_tuned_options(request):
+
+    # Longest Name=Value string the SPSA follow-up could pass, without knowing the tuned values
+    try:
+        options = []
+        for line in request.POST['spsa_inputs'].splitlines():
+            name, dtype, value, minimum, maximum = map(str.strip, line.split(',')[:5])
+            width = 24 if dtype == 'float' else max(len(str(int(float(x)))) for x in (minimum, maximum))
+            options.append('%s=%s' % (name, '9' * width))
+        return ' '.join(options)
+
+    except: return '' # Malformed SPSA inputs are reported by verify_spsa_inputs()
+
+def verify_followup_options_length(errors, request, fields, extra):
+
+    # Options of a follow-up are built while results are reported, so they must fit the database now
+    limit     = Test._meta.get_field('dev_options').max_length
+    overrides = request.POST.get('ltc_options', '') if request.POST.get('ltc_enabled', 'NO') == 'YES' else ''
+
+    try:
+        for field in fields:
+            options = OpenBench.followup_utils.merge_options(request.POST[field], extra)
+            options = OpenBench.followup_utils.merge_options(options, overrides)
+            assert len(options) <= limit
+    except: errors.append('Options of the follow-up would exceed %d characters' % (limit))
 
 def verify_max_games(errors, request, field):
     try:
@@ -436,6 +524,19 @@ def collect_github_info(errors, request, field):
     info   = request.POST['info'] or strip_message(data['commit']['message'])
     source = OpenBench.utils.path_join(base, 'zipball', data['sha'])
     return (source, branch, data['sha'], bench, info)
+
+def collect_followup_info(errors, request):
+
+    if request.POST.get('followup_enabled', 'NO') != 'YES':
+        return None
+
+    # Base of the follow-up SPRT lives in the same repo and engine as the tune.
+    # Resolve it now, so typos fail at creation and the SHA + Bench are pinned.
+    post = request.POST.copy()
+    post['followup_repo'  ] = post['dev_repo']
+    post['followup_engine'] = post['dev_engine']
+
+    return collect_github_info(errors, SimpleNamespace(POST=post), 'followup')
 
 def requests_illegal_fork(request, field):
 

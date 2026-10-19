@@ -72,6 +72,16 @@
                 <tr><td class="td-label">Play Reverses</td><td>{{workload.play_reverses}}</td></tr>
             {% endif %}
 
+            {% if workload.followup_test > 0 %}
+                <tr><td class="td-label">Follow-up</td><td><a href="/test/{{workload.followup_test}}/">#{{workload.followup_test}}</a></td></tr>
+            {% elif workload.followup_test < 0 %}
+                <tr><td class="td-label">Follow-up</td><td>Failed to create, see Events</td></tr>
+            {% elif workload.followup and workload.finished %}
+                <tr><td class="td-label">Follow-up</td><td>Not started @ {{workload.followup.time_control}}</td></tr>
+            {% elif workload.followup %}
+                <tr><td class="td-label">Follow-up</td><td>Pending @ {{workload.followup.time_control}}</td></tr>
+            {% endif %}
+
         </table>
     </div>
 

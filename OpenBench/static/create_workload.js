@@ -270,3 +270,15 @@ function set_test_type() {
         document.getElementById('test_max_games' ).value = base.test_max_games || stc.test_max_games || 40000;
     }
 }
+
+function toggle_followup(prefix) {
+
+    // Only show the settings of a follow-up while it is enabled. Not every
+    // workload type has every follow-up, so missing elements are ignored.
+
+    const enabled  = document.getElementById(prefix + '_enabled');
+    const settings = document.getElementById(prefix + '_settings');
+
+    if (enabled != null && settings != null)
+        settings.hidden = enabled.value != 'YES';
+}
