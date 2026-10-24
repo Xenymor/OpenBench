@@ -1,0 +1,44 @@
+{% extends "OpenBench/base.html" %}
+
+{% load static %}
+
+{% block title %}Workflows{% endblock %}
+
+{% block scripts %}
+    <link rel="stylesheet" href="{% static 'workflow.css' %}?{{ static_version }}">
+{% endblock %}
+
+{% block content %}
+
+    <div class="wf-toolbar">
+        <h3 style="margin: 0; flex: 1;">Workflows</h3>
+        <a class="anchorbutton btn-preset" href="/workflow/new/"><i class="fa-solid fa-plus"></i> Create Workflow</a>
+    </div>
+
+    <table class="hoverable">
+
+        <tr class="table-header">
+            <th>Id</th>
+            <th>Name</th>
+            <th>Author</th>
+            <th>Status</th>
+            <th>Nodes Done</th>
+            <th>Created</th>
+        </tr>
+
+        {% for row in rows %}
+            <tr>
+                <td><a href="/workflow/{{ row.workflow.id }}/">#{{ row.workflow.id }}</a></td>
+                <td><a href="/workflow/{{ row.workflow.id }}/">{{ row.workflow.name }}</a></td>
+                <td>{{ row.workflow.author|capfirst }}</td>
+                <td class="wf-status wf-status-{{ row.workflow.status }}">{{ row.workflow.status }}</td>
+                <td>{{ row.done }} / {{ row.total }}</td>
+                <td class="timestamp">{{ row.workflow.created|date:'U' }}</td>
+            </tr>
+        {% empty %}
+            <tr><td colspan="6">No Workflows yet</td></tr>
+        {% endfor %}
+
+    </table>
+
+{% endblock %}

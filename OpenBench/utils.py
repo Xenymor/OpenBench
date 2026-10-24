@@ -45,7 +45,6 @@ from OpenBench.stats import TrinomialSPRT, PentanomialSPRT
 
 import OpenBench.views
 import OpenBench.model_utils
-import OpenBench.followup_utils
 
 
 class TimeControl(object):
@@ -587,9 +586,6 @@ def update_test(request, machine):
             test.failed   = test.currentllr < test.lowerllr
             test.finished = test.passed or test.failed
 
-            # Spawn the LTC follow-up once the SPRT has passed (no-op otherwise)
-            OpenBench.followup_utils.maybe_create_ltc_followup(test)
-
         elif test.test_mode == 'GAMES':
 
             # Finish test once we've played the proper amount of games
@@ -608,9 +604,6 @@ def update_test(request, machine):
             SPSAParameter.objects.bulk_update(parameters, ['value'])
 
             test.finished = test.games >= 2 * test.spsa_run.pairs_per * test.spsa_run.iterations
-
-            # Spawn the follow-up SPRT once enough of the tune has been played (no-op otherwise)
-            OpenBench.followup_utils.maybe_create_spsa_followup(test)
 
         elif test.test_mode == 'DATAGEN':
 

@@ -1,0 +1,72 @@
+{% extends "OpenBench/base.html" %}
+
+{% load static %}
+
+{% block title %}{{ workflow.name }}{% endblock %}
+
+{% block scripts %}
+
+    {{ workflow.graph|json_script:"json-graph" }}
+    {{ state|json_script:"json-state" }}
+
+    <link rel="stylesheet" href="{% static 'workflow.css' %}?{{ static_version }}">
+    <script src="{% static 'workflow.js' %}?{{ static_version }}"></script>
+
+    <script>
+        document.addEventListener(
+            'DOMContentLoaded', function () {
+                wf.csrf = document.querySelector('[name=csrfmiddlewaretoken]').value;
+                wf_init_view(
+                    {{ workflow.id }},
+                    JSON.parse(document.getElementById('json-graph').textContent),
+                    JSON.parse(document.getElementById('json-state').textContent),
+                    {{ can_modify|yesno:"true,false" }});
+            }, false
+        );
+    </script>
+{% endblock %}
+
+{% block content %}
+
+    {% csrf_token %}
+
+    <div class="wf-toolbar">
+        <h3 style="margin: 0; flex: 1;">
+            #{{ workflow.id }} {{ workflow.name }}
+            &middot; <span id="wf-status" class="wf-status wf-status-{{ workflow.status }}">{{ workflow.status }}</span>
+            &middot; {{ workflow.author|capfirst }}
+            &middot; <span class="timestamp">{{ workflow.created|date:'U' }}</span>
+        </h3>
+
+        {% if can_modify and not workflow.is_final %}
+            {% if workflow.paused %}
+                <form method="POST" action="/workflow/{{ workflow.id }}/resume/">
+                    {% csrf_token %}
+                    <button class="anchorbutton btn-preset" type="submit">Resume</button>
+                </form>
+            {% else %}
+                <form method="POST" action="/workflow/{{ workflow.id }}/pause/">
+                    {% csrf_token %}
+                    <button class="anchorbutton btn-yellow" type="submit">Pause</button>
+                </form>
+            {% endif %}
+            <form method="POST" action="/workflow/{{ workflow.id }}/abort/"
+                  onsubmit="return confirm('Abort this Workflow, and stop all of its running Tests?');">
+                {% csrf_token %}
+                <button class="anchorbutton btn-red" type="submit">Abort</button>
+            </form>
+        {% endif %}
+
+        {% if can_edit %}
+            <a class="anchorbutton btn-preset" href="/workflow/{{ workflow.id }}/edit/">Edit</a>
+        {% endif %}
+
+        <a class="anchorbutton btn-blue" href="/workflow/new/?clone={{ workflow.id }}">Clone</a>
+    </div>
+
+    <div class="wf-layout">
+        <div class="wf-canvas-scroll" id="wf-canvas-scroll"></div>
+        <div class="wf-panel" id="wf-panel"></div>
+    </div>
+
+{% endblock %}

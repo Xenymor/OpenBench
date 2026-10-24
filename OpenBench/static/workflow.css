@@ -1,0 +1,325 @@
+/* Graphical editor and view of Workflows, drawn by workflow.js */
+
+/* Only loaded on the Workflow pages, where graphs benefit from a wider page */
+#content {
+    max-width: calc(min(100%, 1800px));
+}
+
+#content .wf-layout {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    white-space: normal;
+}
+
+#content .wf-canvas-scroll {
+    flex: 1;
+    width: 0; /* Otherwise the canvas would widen the whole page */
+    min-width: 0;
+    height: 640px;
+    overflow: auto;
+    border: 1px solid var(--color3);
+    border-radius: 4px;
+    background-color: #1A1A1A;
+    background-image: radial-gradient(#333333 1px, transparent 1px);
+    background-size: 20px 20px;
+}
+
+#content .wf-canvas {
+    position: relative;
+    user-select: none;
+}
+
+#content .wf-edges {
+    position: absolute;
+    left: 0;
+    top: 0;
+    pointer-events: none;
+}
+
+#content .wf-edge {
+    fill: none;
+    stroke-width: 2.5;
+}
+
+#content .wf-edge-dead {
+    opacity: 0.25;
+    stroke-dasharray: 6 6;
+}
+
+#content .wf-edge-fired {
+    stroke-width: 4;
+}
+
+#content .wf-edge-selected {
+    stroke-width: 5;
+    filter: drop-shadow(0 0 4px white);
+}
+
+#content .wf-edge-drawing {
+    stroke-dasharray: 4 4;
+}
+
+/* An IF waiting for an SPRT it names in its condition, drawn but not stored */
+#content .wf-edge-wait {
+    stroke-width: 2;
+    stroke-dasharray: 1 6;
+    stroke-linecap: round;
+    opacity: 0.55;
+    pointer-events: stroke; /* For the tooltip, since the edge layer itself ignores the mouse */
+    cursor: help;
+}
+
+#content .wf-edge-wait-met {
+    opacity: 1;
+}
+
+#content .wf-edge-hit {
+    fill: none;
+    stroke: transparent;
+    stroke-width: 14;
+    pointer-events: stroke;
+    cursor: pointer;
+}
+
+#content .wf-node {
+    position: absolute;
+    width: 240px;
+    background-color: var(--color2);
+    border: 2px solid var(--color3);
+    border-radius: 6px;
+    font-size: 13px;
+    color: var(--color-font1);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+
+#content .wf-node.wf-selected {
+    border-color: #8BBAD6;
+}
+
+#content .wf-node-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 8px;
+    background-color: #1C2D40;
+    border-radius: 4px 4px 0 0;
+    cursor: move;
+}
+
+#content .wf-kind-SPSA .wf-node-head { background-color: #3D2C4F; }
+#content .wf-kind-JOIN .wf-node-head { background-color: #2F3B2F; }
+#content .wf-kind-IF   .wf-node-head { background-color: #4A3F1C; }
+
+#content .wf-node-label {
+    font-weight: bold;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#content .wf-node-kind {
+    color: var(--color-font2);
+    white-space: nowrap;
+}
+
+#content .wf-node-body {
+    padding: 6px 8px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+#content .wf-node-state {
+    margin-top: 4px;
+    font-weight: bold;
+}
+
+#content .wf-node-elo {
+    color: var(--color-font1);
+}
+
+#content .wf-node-detail {
+    margin-top: 4px;
+    color: var(--color-font2);
+}
+
+#content .wf-node-error {
+    margin-top: 4px;
+    color: #FA9696;
+    white-space: pre-wrap;
+}
+
+#content .wf-port-in {
+    position: absolute;
+    left: -8px;
+    top: 9px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background-color: var(--color-font2);
+    border: 2px solid var(--color2);
+}
+
+#content .wf-ports-out {
+    border-top: 1px solid var(--color3);
+    padding: 4px 0;
+}
+
+#content .wf-port-out {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+    color: var(--color-font2);
+    cursor: crosshair;
+}
+
+#content .wf-dot {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: -8px;
+    border-radius: 50%;
+    border: 2px solid var(--color2);
+}
+
+/* States of the Nodes, in the view */
+
+#content .wf-state-WAITING  { opacity: 0.75; }
+#content .wf-state-SKIPPED  { opacity: 0.35; }
+#content .wf-state-RUNNING  { border-color: #60F0FF; }
+#content .wf-state-FINISHED { border-color: #76D576; }
+#content .wf-state-STOPPED  { border-color: #EFF891; }
+#content .wf-state-ERROR    { border-color: #FA9696; }
+
+/* Side panel */
+
+#content .wf-panel {
+    width: 340px;
+    flex-shrink: 0;
+    max-height: 640px;
+    overflow-y: auto;
+    padding: 0 10px 10px;
+    border: 1px solid var(--color3);
+    border-radius: 4px;
+    background-color: var(--color2);
+    color: var(--color-font1);
+    font-size: 13px;
+}
+
+#content .wf-panel h3,
+#content .wf-panel h4 {
+    margin: 10px 0 8px;
+}
+
+#content .wf-panel-row {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 6px;
+}
+
+#content .wf-panel-row label {
+    color: var(--color-font2);
+    margin-bottom: 2px;
+}
+
+#content .wf-panel input,
+#content .wf-panel textarea {
+    width: 100%;
+    box-sizing: border-box;
+    background-color: var(--color1);
+    color: var(--color-font1);
+    border: 1px solid var(--color3);
+    border-radius: 3px;
+    padding: 4px 6px;
+    font-family: "Courier Prime", serif;
+    font-size: 13px;
+}
+
+#content .wf-help {
+    color: var(--color-font2);
+    white-space: normal;
+    line-height: 1.4;
+}
+
+#content .wf-details td {
+    padding: 2px 6px 2px 0;
+    vertical-align: top;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+#content .wf-details td.td-label {
+    white-space: nowrap;
+    overflow-wrap: normal;
+    color: var(--color-font2);
+}
+
+#content .wf-pre {
+    white-space: pre-wrap;
+    font-size: 12px;
+}
+
+#content .wf-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+#content .wf-toolbar .anchorbutton {
+    padding: 8px 14px 6px;
+}
+
+#content .wf-toolbar input {
+    flex: 1;
+    min-width: 200px;
+    background-color: var(--color1);
+    color: var(--color-font1);
+    border: 1px solid var(--color3);
+    border-radius: 3px;
+    padding: 6px 8px;
+    font-family: "Courier Prime", serif;
+}
+
+#content .wf-toolbar form {
+    display: inline;
+}
+
+#content .wf-toolbar h3 {
+    color: var(--color-font1);
+}
+
+#content .wf-defaults summary {
+    cursor: pointer;
+    color: var(--color-font1);
+    margin: 14px 0 6px;
+    font-size: 18px;
+}
+
+#content .wf-status {
+    font-weight: bold;
+}
+
+#content .wf-status-RUNNING   { color: #60F0FF; }
+#content .wf-status-ATTENTION { color: #EFF891; }
+#content .wf-status-PAUSED    { color: var(--color-font2); }
+#content .wf-status-FINISHED  { color: #76D576; }
+#content .wf-status-ABORTED   { color: #FA9696; }
+
+/* Started Nodes, while editing a running Workflow */
+
+#content .wf-locked .wf-node-kind::after {
+    content: '\f023'; /* Font Awesome lock */
+    font-family: 'Font Awesome 6 Free';
+    font-weight: 900;
+    margin-left: 6px;
+}
+
+@media (max-width: 900px) {
+    #content .wf-layout { flex-direction: column; }
+    #content .wf-panel  { width: 100%; box-sizing: border-box; }
+    #content .wf-canvas-scroll { width: 100%; flex: none; }
+}

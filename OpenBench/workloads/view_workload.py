@@ -48,6 +48,11 @@ def view_workload(request, workload, workload_type):
         'workload' : workload,
     }
 
+    # Tests created by, or attached to, a Workflow link back to it
+    if node := WorkflowNode.objects.select_related('workflow').filter(test=workload).first():
+        data['workflow_node']  = node
+        data['workflow_label'] = node.workflow.graph['nodes'].get(node.key, {}).get('label') or node.key
+
     if workload_type == 'TEST':
         data['type']= workload_type
         data['dev_text'] = 'Dev'

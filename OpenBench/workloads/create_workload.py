@@ -109,15 +109,19 @@ def create_workload(request, workload_type):
     if warning := branch_is_out_of_date(workload):
         warning = 'Consider Rebasing: Dev (%s) appears behind Base (%s)' % (workload.dev.name, workload.base.name)
 
-    username = request.user.username
-    profile  = Profile.objects.get(user=request.user)
-    summary  = 'CREATE P=%d TP=%d' % (workload.priority, workload.throughput)
-    LogEvent.objects.create(author=username, summary=summary, log_file='', test_id=workload.id)
+    finalize_workload(workload, request.user)
+
+    return OpenBench.views.redirect(request, '/index/', warning=warning)
+
+def finalize_workload(workload, user):
+
+    # Shared with Workflows, which create their Tests without a web request
+    profile = Profile.objects.get(user=user)
+    summary = 'CREATE P=%d TP=%d' % (workload.priority, workload.throughput)
+    LogEvent.objects.create(author=user.username, summary=summary, log_file='', test_id=workload.id)
 
     if not OPENBENCH_CONFIG['use_cross_approval'] and profile.approver:
         workload.approved = True; workload.save()
-
-    return OpenBench.views.redirect(request, '/index/', warning=warning)
 
 def create_new_test(request):
 
@@ -169,7 +173,6 @@ def create_new_test(request):
         test.beta     = sprt['beta']
         test.lowerllr = math.log(test.beta / (1.0 - test.alpha))
         test.upperllr = math.log((1.0 - test.beta) / test.alpha)
-        test.followup = create_ltc_settings(request)
 
     if test.test_mode == 'GAMES':
         test.max_games = int(request.POST['test_max_games'])
@@ -191,7 +194,7 @@ def create_new_test(request):
 def create_new_tune(request):
 
     # Collects erros, and collects all data from the Github API
-    errors, (dev_info, followup_info) = verify_workload(request, 'TUNE')
+    errors, dev_info = verify_workload(request, 'TUNE')
 
     if errors:
         return None, errors
@@ -223,9 +226,6 @@ def create_new_tune(request):
 
     test.test_mode        = 'SPSA'
 
-    if followup_info:
-        test.followup = create_followup_settings(request, followup_info)
-
     if test.dev_network:
         name = Network.objects.get(engine=test.dev_engine, sha256=test.dev_network).name
         test.dev_netname = test.base_netname = name
@@ -247,40 +247,6 @@ def parse_sprt_fields(bounds, confidence):
     beta, alpha        = map(float, confidence.strip('[]').split(','))
 
     return { 'elolower' : elolower, 'eloupper' : eloupper, 'alpha' : alpha, 'beta' : beta }
-
-def requests_auto_approve(request, field):
-
-    # Only approvers may have a follow-up SPRT approved without a second look,
-    # and only where they could also approve their own workloads right away
-    profile = Profile.objects.get(user=request.user)
-    allowed = profile.approver and not OPENBENCH_CONFIG['use_cross_approval']
-    return request.POST.get(field) == 'YES' and allowed
-
-def create_followup_settings(request, followup_info):
-
-    return {
-        'base_source'  : followup_info[0],
-        'base_name'    : followup_info[1],
-        'base_sha'     : followup_info[2],
-        'base_bench'   : followup_info[3],
-        'time_control' : OpenBench.utils.TimeControl.parse(request.POST['followup_time_control']),
-        'at_percent'   : float(request.POST['followup_at_percent']),
-        'auto_approve' : requests_auto_approve(request, 'followup_auto_approve'),
-        'ltc'          : create_ltc_settings(request),
-        **parse_sprt_fields(request.POST['followup_bounds'], request.POST['followup_confidence']),
-    }
-
-def create_ltc_settings(request):
-
-    if request.POST.get('ltc_enabled', 'NO') != 'YES':
-        return None
-
-    return {
-        'time_control' : OpenBench.utils.TimeControl.parse(request.POST['ltc_time_control']),
-        'options'      : request.POST.get('ltc_options', '').strip(),
-        'auto_approve' : requests_auto_approve(request, 'ltc_auto_approve'),
-        **parse_sprt_fields(request.POST['ltc_bounds'], request.POST['ltc_confidence']),
-    }
 
 def create_new_datagen(request):
 

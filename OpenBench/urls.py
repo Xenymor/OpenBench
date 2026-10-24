@@ -18,7 +18,7 @@
 #                                                                             #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-import django.urls, OpenBench.views
+import django.urls, OpenBench.views, OpenBench.workflows.views
 
 urlpatterns = [
 
@@ -46,6 +46,12 @@ urlpatterns = [
     # Links to create, view or manage Workloads (Tests, Tunes, Datagen)
     django.urls.re_path(r'^(?P<workload_type>tune|test|datagen)/new/$', OpenBench.views.new_workload),
     django.urls.re_path(r'^(?P<workload_type>tune|test|datagen)/(?P<pk>\d+)(?:/(?P<action>\w+))?/$', OpenBench.views.workload),
+
+    # Links to create, view or manage Workflows of Workloads
+    django.urls.path(r'workflows/', OpenBench.workflows.views.workflows),
+    django.urls.path(r'workflow/new/', OpenBench.workflows.views.new_workflow),
+    django.urls.path(r'workflow/<int:pk>/', OpenBench.workflows.views.workflow),
+    django.urls.path(r'workflow/<int:pk>/<str:action>/', OpenBench.workflows.views.workflow),
 
     # Links for viewing and managing Networks
     django.urls.path(r'networks/', OpenBench.views.networks),

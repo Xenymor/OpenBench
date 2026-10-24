@@ -24,7 +24,7 @@ import math
 
 from django.db.models import CharField, IntegerField, BigIntegerField, BooleanField, FloatField
 from django.db.models import JSONField, ForeignKey, DateTimeField, OneToOneField
-from django.db.models import CASCADE, PROTECT, Model, TextChoices
+from django.db.models import CASCADE, PROTECT, SET_NULL, Model, TextChoices
 from django.contrib.auth.models import User
 
 class Engine(Model):
@@ -241,8 +241,6 @@ class Test(Model):
     max_games     = IntegerField(default=0) # GAMES or DATAGEN
     genfens_args  = CharField(max_length=256, default='', blank=True) # DATAGEN
     play_reverses = BooleanField(default=False) # DATAGEN
-    followup      = JSONField(default=None, null=True, blank=True) # SPRT or SPSA, settings for an automatic follow-up SPRT
-    followup_test = IntegerField(default=0) # SPRT or SPSA, Id of the follow-up SPRT once it was created
 
     # Collection of all individual Result() objects
     games  = IntegerField(default=0) # Overall
@@ -401,3 +399,57 @@ class SPSAParameter(Model):
 
     c_value   = FloatField() # Constants pre-computed for speed
     a_value   = FloatField()
+
+class Workflow(Model):
+
+    class Status(TextChoices):
+        RUNNING   = 'RUNNING'  , 'RUNNING'   # Nodes are running, or about to be started
+        ATTENTION = 'ATTENTION', 'ATTENTION' # At least one Node is STOPPED or ERROR
+        PAUSED    = 'PAUSED'   , 'PAUSED'    # Manually paused, no new Nodes are started
+        FINISHED  = 'FINISHED' , 'FINISHED'  # Every Node is FINISHED or SKIPPED
+        ABORTED   = 'ABORTED'  , 'ABORTED'   # Manually aborted, nothing happens anymore
+
+    author  = CharField(max_length=64)
+    name    = CharField(max_length=128)
+    status  = CharField(max_length=16, choices=Status.choices, default=Status.RUNNING, db_index=True)
+    paused  = BooleanField(default=False)
+    created = DateTimeField(auto_now_add=True)
+    updated = DateTimeField(auto_now=True)
+
+    # { 'defaults' : {...}, 'nodes' : { key : {...} }, 'edges' : [...] }, see OpenBench/workflows/graph.py
+    graph = JSONField(default=dict)
+
+    def __str__(self):
+        return '[%d] %s' % (self.id, self.name)
+
+    def is_final(self):
+        return self.status in [Workflow.Status.FINISHED, Workflow.Status.ABORTED]
+
+class WorkflowNode(Model):
+
+    class State(TextChoices):
+        WAITING  = 'WAITING' , 'WAITING'  # Not every incoming edge is decided yet
+        RUNNING  = 'RUNNING' , 'RUNNING'  # The Test was created, and has no outcome yet
+        FINISHED = 'FINISHED', 'FINISHED' # Decided, with the port in outcome
+        SKIPPED  = 'SKIPPED' , 'SKIPPED'  # Can never start, since no incoming edge fired
+        STOPPED  = 'STOPPED' , 'STOPPED'  # The Test was stopped or deleted by hand
+        ERROR    = 'ERROR'   , 'ERROR'    # The Test could not be created
+
+    workflow = ForeignKey(Workflow, CASCADE, related_name='nodes')
+    key      = CharField(max_length=32)
+    kind     = CharField(max_length=16)
+    state    = CharField(max_length=16, choices=State.choices, default=State.WAITING)
+    outcome  = CharField(max_length=16, blank=True) # Port that fired, once FINISHED
+    test     = OneToOneField(Test, SET_NULL, null=True, blank=True, related_name='workflow_node')
+    trigger  = CharField(max_length=32, blank=True) # Key of the Node whose edge started this one
+    tuned    = CharField(max_length=2048, blank=True) # SPSA values, frozen when the Node finished
+    detail   = CharField(max_length=256, blank=True)  # IF, the result its condition was evaluated on
+    error    = CharField(max_length=1024, blank=True)
+    started  = DateTimeField(null=True, blank=True)
+    finished = DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = [('workflow', 'key')]
+
+    def __str__(self):
+        return '[%d] %s %s' % (self.workflow_id, self.key, self.state)

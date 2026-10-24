@@ -21,6 +21,7 @@
 import atexit
 import pathlib
 import platform
+import sys
 import threading
 
 import django.apps
@@ -70,9 +71,10 @@ class OpenBenchConfig(django.apps.AppConfig):
             if config.OPENBENCH_CONFIG is None:
                 config.OPENBENCH_CONFIG = config.create_openbench_config()
 
-        # Attempt to spawn the PGN Watcher, globally once
+        # Attempt to spawn the PGN and Workflow Watchers, globally once
 
         from OpenBench.pgn_watcher import PGNWatcher
+        from OpenBench.workflows.watcher import WorkflowWatcher
 
         # Result of fopen(LOCKFILE_PATH) after obtaining the lock, otherwise None
         self.lockfile = acquire_watcher_lockfile()
@@ -84,6 +86,12 @@ class OpenBenchConfig(django.apps.AppConfig):
             self.pgn_watcher = PGNWatcher(self.stop_pgn_watcher, daemon=True)
             self.pgn_watcher.start()
 
+            # Start a Workflow Watcher, but never under the test runner, whose tests drive Workflows themselves
+            if sys.argv[1:2] != ['test']:
+                self.stop_workflow_watcher = threading.Event()
+                self.workflow_watcher = WorkflowWatcher(self.stop_workflow_watcher, daemon=True)
+                self.workflow_watcher.start()
+
             # We expect a nice sys.exit(0) to allow our atexit to execute
             atexit.register(self.shutdown)
 
@@ -93,6 +101,11 @@ class OpenBenchConfig(django.apps.AppConfig):
         if hasattr(self, 'pgn_watcher') and self.pgn_watcher.is_alive():
             self.stop_pgn_watcher.set()
             self.pgn_watcher.join()
+
+        # Signal the Workflow Watcher to shutdown
+        if hasattr(self, 'workflow_watcher') and self.workflow_watcher.is_alive():
+            self.stop_workflow_watcher.set()
+            self.workflow_watcher.join()
 
         # Cleanup Lockfile if we hold it
         if self.lockfile:
