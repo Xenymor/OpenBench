@@ -32,6 +32,7 @@
 # as the web forms, from a POST that merges the Workflow's defaults, the Node's
 # config, and the engines it refers to. So they are verified the very same way.
 
+import re
 import traceback
 
 from types import SimpleNamespace
@@ -47,6 +48,7 @@ import OpenBench.views # Before the workload modules, which only import cleanly 
 from OpenBench.models import LogEvent, Profile, Test, Workflow, WorkflowNode
 from OpenBench.workflows import conditions
 from OpenBench.workflows import graph as Graph
+from OpenBench.workflows import notifications
 from OpenBench.workflows.options import merge_options, is_option_string, estimate_tuned_options
 from OpenBench.workloads import create_workload as Create
 from OpenBench.workloads import verify_workload as Verify
@@ -77,6 +79,9 @@ def setting(graph, config, field):
 
 def option_limit():
     return Test._meta.get_field('dev_options').max_length
+
+# Reported by Client/bench.py, for binaries named as in Client/utils.py:engine_binary_name()
+WRONG_BENCH = re.compile(r'^\[(?P<binary>[^\]]+)\] Wrong Bench: (?P<bench>\d+)$')
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 #                         BUILDING THE WORKLOAD POSTS                         #
@@ -117,6 +122,14 @@ def build_post(graph, key, engines):
 
     return post
 
+def network_override(config, side, network):
+
+    # A Node may pick its own Network: empty keeps the given one, 'none' runs without
+    value = str(config.get('%s_network' % (side), '') or '').strip()
+    if not value:
+        return network
+    return '' if value.lower() == 'none' else value
+
 def branch_engine(graph, key, side):
 
     # An engine given by its branch, which create_new_test() will resolve
@@ -126,9 +139,9 @@ def branch_engine(graph, key, side):
     return {
         'repo'    : str(defaults.get('%s_repo'    % (side), '')),
         'engine'  : str(defaults.get('%s_engine'  % (side), '')),
-        'network' : str(defaults.get('%s_network' % (side), '')),
+        'network' : network_override(config, side, str(defaults.get('%s_network' % (side), ''))),
         'branch'  : str(config.get(side, '')).strip(),
-        'bench'   : str(config.get('%s_bench' % (side), '')).strip() or 'Autofill',
+        'bench'   : Graph.bench_override(config, side) or 'Autofill',
         'options' : merge_options(str(defaults.get('%s_options' % (side), '')), str(config.get('%s_options' % (side), ''))),
     }
 
@@ -192,9 +205,9 @@ def resolve_engines(workflow, nodes, node):
             engines[side] = {
                 'repo'    : engine['repo'],
                 'engine'  : engine['engine'],
-                'network' : engine['network'],
-                'branch'  : engine['sha'],   # Pinned to the exact commit
-                'bench'   : engine['bench'], # Which then needs no Bench in its message
+                'network' : network_override(config, side, engine['network']),
+                'branch'  : engine['sha'], # Pinned to the exact commit, so its Bench carries over,
+                'bench'   : Graph.bench_override(config, side) or engine['bench'], # unless given for another net
                 'options' : merge_options(engine['options'], str(config.get('%s_options' % (side), ''))),
             }
 
@@ -473,12 +486,44 @@ def observe(workflow, node):
         finish(node, 'done')
 
     elif test.finished:
-        node.state, node.error = State.STOPPED, 'The Test was stopped'
+        node.state = State.STOPPED
+        if before[0] != State.STOPPED: # Looked up once, when the Test stops
+            node.error = stop_reason(test)
 
     else: # Running, possibly again after a restart
         node.state, node.error = State.RUNNING, ''
 
     return before != (node.state, node.outcome, node.error)
+
+def stop_reason(test):
+
+    # Workers stop a Test whose engine does not build or bench correctly, and log why
+    event = LogEvent.objects.filter(test_id=test.id).exclude(machine_id=0).order_by('-id').first()
+    if event and 'Bench' in event.summary:
+        return ('Stopped by a worker: %s' % (event.summary))[:1024]
+    return 'The Test was stopped'
+
+def binary_matches(binary, test, side):
+
+    # Binaries are named <engine>-<SHA>[-<network>], with .exe on Windows
+    engine  = getattr(test, side)
+    network = getattr(test, '%s_network' % (side)) or ''
+    suffix  = '-%s' % (engine.sha.upper()[:8]) + ('-%s' % (network[-8:]) if network else '')
+    return re.sub(r'\.exe$', '', binary.strip(), flags=re.IGNORECASE).upper().endswith(suffix.upper())
+
+def measured_benches(test, sides):
+
+    # { side : set of Benches } that workers measured where the Test expected another
+    found  = {}
+    events = LogEvent.objects.filter(test_id=test.id, summary__contains='Wrong Bench').exclude(machine_id=0)
+
+    for summary in events.values_list('summary', flat=True):
+        if match := WRONG_BENCH.match(summary.strip()):
+            for side in sides:
+                if binary_matches(match['binary'], test, side):
+                    found.setdefault(side, set()).add(int(match['bench']))
+
+    return found
 
 def spsa_games_needed(workflow, node):
     config  = workflow.graph['nodes'][node.key].get('config', {})
@@ -605,8 +650,9 @@ def step(workflow_id):
         if workflow.is_final():
             return workflow
 
-        query = workflow.nodes.select_related('test', 'test__spsa_run', 'test__dev', 'test__base')
-        nodes = { node.key : node for node in query }
+        query  = workflow.nodes.select_related('test', 'test__spsa_run', 'test__dev', 'test__base')
+        nodes  = { node.key : node for node in query }
+        before = ({ key : node.state for key, node in nodes.items() }, workflow.status)
 
         for node in nodes.values():
             if observe(workflow, node):
@@ -642,7 +688,53 @@ def step(workflow_id):
             workflow.status = status
             workflow.save(update_fields=['status', 'updated'])
 
+        # Announced only once all of this is committed, and never what was rolled back
+        if events := collect_events(workflow, nodes, *before):
+            transaction.on_commit(lambda: notifications.notify(workflow, events))
+
     return workflow
+
+def result_line(workflow, key, node):
+
+    label = Graph.label(workflow.graph, key)
+
+    if node.state == State.SKIPPED:
+        return '%s: skipped' % (label)
+
+    if node.kind == 'SPRT' and node.test:
+        lower, elo, upper = OpenBench.stats.Elo(node.test.results())
+        return '%s: %s, Elo %+.2f ± %.2f, %d games' % (label, node.outcome, elo, max(upper - elo, elo - lower), node.test.games)
+
+    if node.kind == 'SPSA' and node.tuned:
+        return '%s: %s, %s' % (label, node.outcome, node.tuned[:300])
+
+    return '%s: %s' % (label, node.outcome or node.state.lower())
+
+def collect_events(workflow, nodes, states, status):
+
+    # What happened during one step, as ( kind, line ) for notifications.notify().
+    # states and status are from before the step, so each change is announced once.
+    level  = notifications.level(workflow.graph)
+    events = []
+
+    if level == 'off':
+        return events
+
+    for key, node in nodes.items():
+
+        changed = states.get(key) != node.state
+        label   = Graph.label(workflow.graph, key)
+
+        if changed and node.state in [State.STOPPED, State.ERROR]:
+            events.append(('attention', '%s: %s' % (label, node.error or node.state.lower())))
+
+        if changed and level == 'all' and node.state == State.FINISHED and node.kind in ['SPRT', 'SPSA']:
+            events.append((node.outcome, result_line(workflow, key, node)))
+
+    if workflow.status == Status.FINISHED and status != Status.FINISHED:
+        events += [('finished', result_line(workflow, key, node)) for key, node in nodes.items()]
+
+    return events
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 #                           ACTIONS FROM THE USERS                            #
@@ -689,6 +781,38 @@ def retry(workflow_id, key):
 
     return step(workflow_id)
 
+def use_measured_bench(workflow_id, key):
+
+    # Restarts a Node whose Test the workers stopped for a wrong Bench, with the Bench
+    # they measured. The stopped Test is left as it is, and a new one is created.
+    with transaction.atomic():
+        workflow = Workflow.objects.select_for_update().get(id=workflow_id)
+        node     = workflow.nodes.select_related('test', 'test__dev', 'test__base').get(key=key)
+        config   = workflow.graph['nodes'][key].setdefault('config', {})
+
+        if node.state != State.STOPPED or not node.test:
+            raise WorkflowError('Only stopped Nodes can be restarted with a measured Bench')
+
+        if config.get('existing_test'):
+            raise WorkflowError('This Node attaches an existing Test, whose Bench it cannot change')
+
+        found = measured_benches(node.test, Graph.ENGINES[node.kind])
+
+        if not found:
+            raise WorkflowError('No worker reported a wrong Bench for this Test')
+
+        if conflicts := ['%s: %s' % (side.title(), ', '.join(map(str, sorted(values)))) for side, values in found.items() if len(values) > 1]:
+            raise WorkflowError('Workers measured different Benches (%s), so check the build by hand' % ('; '.join(conflicts)))
+
+        for side, values in found.items():
+            config['%s_bench' % (side)] = str(next(iter(values)))
+
+        node.test, node.state, node.error, node.trigger, node.started = None, State.WAITING, '', '', None
+        node.save()
+        workflow.save()
+
+    return step(workflow_id)
+
 def resolve(workflow_id, key, outcome):
 
     # Decides a stopped or failed Node by hand, as if its Test had that outcome
@@ -699,8 +823,8 @@ def resolve(workflow_id, key, outcome):
         if node.state not in [State.STOPPED, State.ERROR]:
             raise WorkflowError('Only STOPPED or ERROR Nodes can be decided by hand')
 
-        if outcome not in Graph.PORTS[node.kind]:
-            raise WorkflowError('%s has no output "%s"' % (node.kind, outcome))
+        if outcome not in Graph.outcomes(node.kind):
+            raise WorkflowError('%s cannot be decided as "%s"' % (node.kind, outcome))
 
         if node.kind == 'SPSA' and node.test:
             node.tuned = OpenBench.spsa_utils.spsa_tuned_options(node.test)

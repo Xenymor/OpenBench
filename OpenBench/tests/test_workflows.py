@@ -23,15 +23,18 @@
 import copy
 import hashlib
 import json
+import os
 import re
+import tempfile
 
 from unittest import mock
 
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 
-from OpenBench.models import Book, EngineConfig, Profile, Test, Workflow, WorkflowNode
+from OpenBench.models import Book, EngineConfig, LogEvent, Network, Profile, Test, Workflow, WorkflowNode
 from OpenBench.workflows import conditions
+from OpenBench.workflows import notifications
 from OpenBench.workflows import graph as Graph
 from OpenBench.workflows import runner
 from OpenBench.workflows.options import merge_options
@@ -116,6 +119,54 @@ class ConditionTests(SimpleTestCase):
                      '__import__("os")', 'elo > 1; passed', '(' * 40 + 'passed' + ')' * 40, 'a' * 300]:
             with self.assertRaises(conditions.ConditionError, msg=text):
                 conditions.parse(text)
+
+class NotificationTests(SimpleTestCase):
+
+    WEBHOOK = 'https://discord.com/api/webhooks/123456/abc_DEF-ghi'
+
+    def config_from(self, text):
+        with tempfile.NamedTemporaryFile('w', suffix='.discord', delete=False) as fout:
+            fout.write(text)
+        try: return notifications.read_config(fout.name)
+        finally: os.unlink(fout.name)
+
+    def test_reading_the_credentials(self):
+
+        config = self.config_from('webhook=%s\nsite=https://bench.example.com/\n' % (self.WEBHOOK))
+        self.assertEqual(config, { 'webhook' : self.WEBHOOK, 'site' : 'https://bench.example.com' })
+
+        # Only Discord's webhooks, and a site that is a web address
+        self.assertIsNone(self.config_from('webhook=https://evil.example.com/api/webhooks/1/x'))
+        self.assertIsNone(self.config_from('webhook=http://discord.com/api/webhooks/1/x'))
+        self.assertEqual(self.config_from('webhook=%s\nsite=javascript:alert(1)' % (self.WEBHOOK))['site'], '')
+        self.assertIsNone(notifications.read_config(os.path.join(tempfile.gettempdir(), 'does-not-exist.discord')))
+
+    def test_messages_never_ping_anyone(self):
+
+        workflow = Workflow(id=12, name='@everyone LMR')
+        message  = notifications.build_message(workflow, [('attention', 'ab: Stopped'), ('finished', 'ab: passed')], 'https://bench.example.com')
+
+        self.assertEqual(message['allowed_mentions'], { 'parse' : [] })
+        self.assertEqual([embed['title'] for embed in message['embeds']], ['#12 @everyone LMR needs attention', '#12 @everyone LMR finished'])
+        self.assertEqual(message['embeds'][0]['url'], 'https://bench.example.com/workflow/12/')
+
+    def test_delivery(self):
+
+        sent = []
+        with mock.patch.object(notifications, 'read_config', lambda: { 'webhook' : self.WEBHOOK, 'site' : '' }), \
+             mock.patch.object(notifications.requests, 'post', lambda url, json, timeout: sent.append((url, json)) or mock.Mock(status_code=204)), \
+             mock.patch.object(notifications.threading, 'Thread', lambda target, args, daemon: mock.Mock(start=lambda: target(*args))):
+            notifications.notify(Workflow(id=1, name='A'), [('attention', 'x: broken')])
+            notifications.notify(Workflow(id=1, name='A'), [])
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], self.WEBHOOK)
+        self.assertEqual(sent[0][1]['embeds'][0]['description'], 'x: broken')
+
+        # Not set up: nothing is sent at all
+        with mock.patch.object(notifications, 'read_config', lambda: None), \
+             mock.patch.object(notifications.requests, 'post', lambda *args, **kwargs: self.fail('Must not post')):
+            notifications.notify(Workflow(id=1, name='A'), [('attention', 'x: broken')])
 
 class GraphTests(SimpleTestCase):
 
@@ -365,7 +416,7 @@ class RunnerTests(TestCase):
 
     def create(self, graph):
         graph = copy.deepcopy(graph)
-        graph['defaults'] = self.defaults()
+        graph['defaults'] = dict(self.defaults(), **graph.get('defaults', {}))
         for item in graph['nodes'].values():
             if item['kind'] == 'SPSA':
                 item['config'].update(spsa_iterations='10', spsa_pairs_per='2', spsa_alpha='0.602',
@@ -769,6 +820,237 @@ class RunnerTests(TestCase):
         self.assertIn('y: failed', nodes['if'].detail)
         self.assertEqual(nodes['next'].test.dev.name, 'x')
         self.assertEqual(nodes['next'].test.base.name, 'y')
+
+    def test_networks_per_node(self):
+
+        Network.objects.create(engine='Fispur', sha256='aaaa1111', name='net-a', author='Xenymor')
+        Network.objects.create(engine='Fispur', sha256='bbbb2222', name='net-b', author='Xenymor')
+
+        graph = {
+            'defaults' : {},
+            'nodes' : {
+                # Each engine its own net, and later the same commits with other nets
+                'a'    : node('SPRT', dev='x', base='main', dev_network='aaaa1111', base_network='bbbb2222', dev_bench='1001', base_bench='2002'),
+                'same' : node('SPRT', dev='@a.dev', base='@a.base'),
+                'swap' : node('SPRT', dev='@a.dev', base='@a.dev', base_network='none', base_bench='111111'),
+                'tune' : node('SPSA', dev='@a.dev', dev_network='bbbb2222', dev_bench='222222', spsa_inputs='A, int, 10, 0, 20, 2, 0.002'),
+            },
+            'edges' : [ edge('a', 'done', 'same'), edge('a', 'done', 'swap'), edge('a', 'done', 'tune') ],
+        }
+
+        workflow = self.create(graph)
+        a = self.nodes(workflow)['a'].test
+        self.assertEqual((a.dev_network, a.dev_netname), ('aaaa1111', 'net-a'))
+        self.assertEqual((a.base_network, a.base_netname), ('bbbb2222', 'net-b'))
+        self.assertEqual((a.dev.bench, a.base.bench), (1001, 2002))
+
+        self.finish_sprt(a, passed=True)
+        nodes = self.nodes(runner.step(workflow.id))
+
+        # A reference keeps the net it was tested with, unless the Node picks another
+        self.assertEqual((nodes['same'].test.dev_network, nodes['same'].test.base_network), ('aaaa1111', 'bbbb2222'))
+        self.assertEqual((nodes['swap'].test.dev_network, nodes['swap'].test.base_network), ('aaaa1111', ''))
+        self.assertEqual(nodes['tune'].test.dev_network, 'bbbb2222')
+        self.assertEqual(nodes['tune'].test.dev_netname, 'net-b')
+        self.assertEqual((nodes['swap'].test.base.bench, nodes['tune'].test.dev.bench), (111111, 222222))
+
+        # A net of another engine, or one that does not exist, is rejected on save
+        graph['nodes']['a']['config']['dev_network'] = 'cccc3333'
+        graph['defaults'] = self.defaults()
+        workflow, errors = runner.create_workflow(self.user, 'Bad net', graph)
+        self.assertIsNone(workflow)
+        self.assertTrue(any(error.startswith('a: Unknown Network') for error in errors), errors)
+
+    def test_benches_of_references(self):
+
+        Network.objects.create(engine='Fispur', sha256='aaaa1111', name='net-a', author='Xenymor')
+
+        graph = {
+            'defaults' : {},
+            'nodes' : {
+                'a'     : node('SPRT', dev='x', base='main'),
+                'carry' : node('SPRT', dev='@a.dev', base='@a.base'),                         # Same commits, same nets
+                'given' : node('SPRT', dev='@a.dev', base='@a.base', base_bench='424242'),   # Corrected by hand
+                'net'   : node('SPRT', dev='@a.dev', base='@a.base', dev_network='aaaa1111', dev_bench='777777'),
+            },
+            'edges' : [ edge('a', 'done', 'carry'), edge('a', 'done', 'given'), edge('a', 'done', 'net') ],
+        }
+
+        # Another net without its Bench would fail on every worker, so it fails right here
+        broken = copy.deepcopy(graph)
+        broken['nodes']['net']['config']['dev_bench'] = ''
+        broken['defaults'] = self.defaults()
+        workflow, errors = runner.create_workflow(self.user, 'No bench', broken)
+        self.assertTrue(any('picks its own Network, so its Bench' in error for error in errors), errors)
+
+        broken['nodes']['net']['config']['dev_bench'] = 'lots'
+        workflow, errors = runner.create_workflow(self.user, 'Bad bench', broken)
+        self.assertTrue(any('Bench must be a positive number' in error for error in errors), errors)
+
+        workflow = self.create(graph)
+        a = self.nodes(workflow)['a'].test
+        self.finish_sprt(a, passed=True)
+        nodes = self.nodes(runner.step(workflow.id))
+
+        self.assertEqual((nodes['carry'].test.dev.bench, nodes['carry'].test.base.bench), (a.dev.bench, a.base.bench))
+        self.assertEqual((nodes['given'].test.dev.bench, nodes['given'].test.base.bench), (a.dev.bench, 424242))
+        self.assertEqual((nodes['net'].test.dev.bench, nodes['net'].test.dev_network), (777777, 'aaaa1111'))
+        self.assertEqual(nodes['net'].test.dev.sha, a.dev.sha)
+
+    def test_benches_of_branches_with_other_nets(self):
+
+        Network.objects.create(engine='Fispur', sha256='aaaa1111', name='net-a', author='Xenymor')
+        Network.objects.create(engine='Fispur', sha256='bbbb2222', name='net-b', author='Xenymor')
+
+        def graph_with(**config):
+            defaults = dict(self.defaults(), dev_network='aaaa1111', base_network='aaaa1111')
+            return { 'defaults' : defaults, 'nodes' : { 'a' : node('SPRT', dev='feature', base='main', **config) }, 'edges' : [] }
+
+        # The Bench in the commit message belongs to the default net, not to another one
+        workflow, errors = runner.create_workflow(self.user, 'Other net', graph_with(dev_network='bbbb2222'))
+        self.assertTrue(any('picks its own Network, so its Bench' in error for error in errors), errors)
+
+        # Picking the default net again changes nothing, so the Bench may still be autofilled
+        workflow, errors = runner.create_workflow(self.user, 'Same net', graph_with(dev_network='aaaa1111'))
+        self.assertIsNone(errors)
+
+        # Thousands separators are fine, as in commit messages
+        workflow, errors = runner.create_workflow(self.user, 'Commas', graph_with(dev_network='bbbb2222', dev_bench='1,600,000'))
+        self.assertIsNone(errors)
+        self.assertEqual(self.nodes(workflow)['a'].test.dev.bench, 1600000)
+
+    def wrong_bench(self, test, side, measured, network='', exe=False):
+
+        # What views.client_bench_error() records when a worker measures another Bench
+        engine = getattr(test, side)
+        binary = 'Fispur-%s' % (engine.sha.upper()[:8]) + ('-%s' % (network) if network else '') + ('.exe' if exe else '')
+        LogEvent.objects.create(author='Xenymor', summary='[%s] Wrong Bench: %d' % (binary, measured),
+                                log_file='', machine_id=7, test_id=test.id)
+        test.finished = True
+        test.save()
+
+    def test_measured_bench_restarts_the_node(self):
+
+        workflow = self.create(condition_graph())
+        old      = self.nodes(workflow)['ab'].test
+        self.wrong_bench(old, 'dev', 1234567, exe=True)
+
+        node = self.nodes(runner.step(workflow.id))['ab']
+        self.assertEqual(node.state, 'STOPPED')
+        self.assertIn('Stopped by a worker:', node.error)
+        self.assertIn('Wrong Bench: 1234567', node.error)
+
+        # The view offers the Bench that was measured
+        self.client.force_login(self.user)
+        state = self.client.get('/workflow/%d/state/' % (workflow.id)).json()['nodes']['ab']['bench']
+        self.assertEqual(state, { 'dev' : { 'given' : old.dev.bench, 'measured' : [1234567] } })
+
+        # One click: a new Test with that Bench, the stopped one stays as it is
+        self.client.post('/workflow/%d/fixbench/' % (workflow.id), { 'key' : 'ab' })
+        node = self.nodes(Workflow.objects.get(id=workflow.id))['ab']
+        self.assertEqual(node.state, 'RUNNING')
+        self.assertNotEqual(node.test.id, old.id)
+        self.assertEqual((node.test.dev.bench, node.test.base.bench), (1234567, old.base.bench))
+        self.assertEqual(Workflow.objects.get(id=workflow.id).graph['nodes']['ab']['config']['dev_bench'], '1234567')
+        self.assertTrue(Test.objects.get(id=old.id).finished)
+
+    def test_measured_bench_of_base_and_with_nets(self):
+
+        Network.objects.create(engine='Fispur', sha256='aaaa1111', name='net-a', author='Xenymor')
+        graph = { 'defaults' : {}, 'edges' : [],
+                  'nodes' : { 'a' : node('SPRT', dev='x', base='main', base_network='aaaa1111', base_bench='555') } }
+
+        workflow = self.create(graph)
+        old      = self.nodes(workflow)['a'].test
+        self.wrong_bench(old, 'base', 2222222, network='aaaa1111')
+        runner.step(workflow.id)
+
+        restarted = self.nodes(runner.use_measured_bench(workflow.id, 'a'))['a']
+        self.assertEqual((restarted.test.base.bench, restarted.test.base_network), (2222222, 'aaaa1111'))
+        self.assertEqual(restarted.test.dev.bench, old.dev.bench)
+
+        # The new Test has no reports of its own yet
+        self.assertEqual(runner.measured_benches(restarted.test, ['dev', 'base']), {})
+
+        # A binary without the net is a different build, and is not taken for Base
+        LogEvent.objects.create(author='Xenymor', summary='[Fispur-%s] Wrong Bench: 3' % (old.base.sha.upper()[:8]),
+                                log_file='', machine_id=7, test_id=restarted.test.id)
+        self.assertEqual(runner.measured_benches(restarted.test, ['base']), {})
+
+    def test_disagreeing_workers_and_other_stops(self):
+
+        workflow = self.create(condition_graph())
+        test     = self.nodes(workflow)['ab'].test
+        self.wrong_bench(test, 'dev', 1111111)
+        self.wrong_bench(test, 'dev', 1111112)
+        runner.step(workflow.id)
+
+        with self.assertRaisesRegex(runner.WorkflowError, 'different Benches'):
+            runner.use_measured_bench(workflow.id, 'ab')
+
+        # Stopped by hand: no suggestion, and nothing to restart with
+        workflow = self.create(condition_graph())
+        test     = self.nodes(workflow)['ab'].test
+        test.finished = True
+        test.save()
+        node = self.nodes(runner.step(workflow.id))['ab']
+        self.assertEqual(node.error, 'The Test was stopped')
+
+        with self.assertRaisesRegex(runner.WorkflowError, 'No worker reported'):
+            runner.use_measured_bench(workflow.id, 'ab')
+
+        # 'done' always fires alongside the outcome, so it is not an outcome of its own
+        with self.assertRaisesRegex(runner.WorkflowError, 'cannot be decided as "done"'):
+            runner.resolve(workflow.id, 'ab', 'done')
+        self.assertEqual(Graph.outcomes('SPRT'), ['passed', 'failed'])
+        self.assertEqual(Graph.outcomes('SPSA'), ['done'])
+
+    def capture_notifications(self, action):
+
+        # Runs action, and returns the events that would have been sent, once committed
+        sent = []
+        with mock.patch.object(notifications, 'notify', lambda workflow, events: sent.append(events)):
+            with self.captureOnCommitCallbacks(execute=True):
+                result = action()
+        return result, sent
+
+    def test_notifications_for_problems_and_the_end(self):
+
+        # A Node that cannot start is announced once, not on every later step
+        graph = { 'defaults' : {}, 'nodes' : { 'a' : node('SPRT', dev='nobench', base='main') }, 'edges' : [] }
+        workflow, sent = self.capture_notifications(lambda: self.create(graph))
+        self.assertEqual([kind for events in sent for kind, line in events], ['attention'])
+        self.assertIn('Unable to parse a Bench', sent[0][0][1])
+
+        _, sent = self.capture_notifications(lambda: runner.step(workflow.id))
+        self.assertEqual(sent, [])
+
+        # The end of a Workflow lists every Node
+        workflow, sent = self.capture_notifications(lambda: self.create(condition_graph()))
+        self.assertEqual(sent, [])
+
+        self.set_penta(self.nodes(workflow)['ab'].test, (120, 300, 500, 300, 100), passed=False)
+        workflow, sent = self.capture_notifications(lambda: runner.step(workflow.id))
+        self.assertEqual(sent, []) # Only attention and the end, by default
+
+        self.finish_sprt(self.nodes(workflow)['no'].test, passed=True)
+        workflow, sent = self.capture_notifications(lambda: runner.step(workflow.id))
+        lines = [line for kind, line in sent[0] if kind == 'finished']
+        self.assertEqual(workflow.status, 'FINISHED')
+        self.assertTrue(lines[0].startswith('ab: failed, Elo -5.26'))
+        self.assertIn('yes: skipped', lines)
+
+    def test_notification_levels(self):
+
+        graph = condition_graph()
+        graph['nodes']['ab']['config']['notify'] = 'ignored' # Only the defaults count
+
+        for notify, expected in [('all', ['failed']), ('off', [])]:
+            graph['defaults'] = { 'notify' : notify }
+            workflow = self.create(graph)
+            self.set_penta(self.nodes(workflow)['ab'].test, (120, 300, 500, 300, 100), passed=False)
+            _, sent = self.capture_notifications(lambda: runner.step(workflow.id))
+            self.assertEqual([kind for events in sent for kind, line in events], expected, notify)
 
     def test_settings_are_verified_at_creation(self):
 

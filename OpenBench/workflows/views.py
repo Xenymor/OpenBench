@@ -175,6 +175,7 @@ def workflow(request, pk, action=None):
         'state'      : workflow_state(workflow),
         'can_modify' : bool(profile and (profile.approver or workflow.author == request.user.username)),
         'can_edit'   : bool(profile and workflow.author == request.user.username and workflow.status != Workflow.Status.ABORTED),
+        'networks'   : list(Network.objects.values('engine', 'sha256', 'name')),
     }
 
     return OpenBench.views.render(request, 'workflow.html', data)
@@ -203,6 +204,7 @@ def modify_workflow(request, workflow, action):
         elif action == 'abort'   : runner.abort(workflow.id, request.user.username)
         elif action == 'retry'   : runner.retry(workflow.id, key)
         elif action == 'resolve' : runner.resolve(workflow.id, key, request.POST.get('outcome', ''))
+        elif action == 'fixbench': runner.use_measured_bench(workflow.id, key)
         else: return OpenBench.views.redirect(request, target, error='Unknown Workflow action')
 
     except WorkflowNode.DoesNotExist:
@@ -226,11 +228,19 @@ def workflow_state(workflow):
             'trigger' : node.trigger,
             'tuned'   : node.tuned,
             'detail'  : node.detail,
-            'ports'   : Graph.PORTS[node.kind],
+            'ports'   : Graph.outcomes(node.kind), # What the Node can be decided as, by hand
             'test'    : test_state(node.test) if node.test else None,
+            'bench'   : bench_state(node) if node.state == 'STOPPED' and node.test else None,
         }
 
     return { 'status' : workflow.status, 'paused' : workflow.paused, 'nodes' : nodes }
+
+def bench_state(node):
+
+    # What workers measured, for a Test they stopped because of a wrong Bench
+    found = runner.measured_benches(node.test, Graph.ENGINES[node.kind])
+    return { side : { 'given' : getattr(node.test, side).bench, 'measured' : sorted(values) }
+             for side, values in found.items() } or None
 
 def test_state(test):
 
@@ -242,6 +252,10 @@ def test_state(test):
         'finished' : test.finished,
         'deleted'  : test.deleted,
     }
+
+    # Names of the Networks, which the Nodes only know by their sha
+    state['dev_netname']  = test.dev_netname
+    state['base_netname'] = test.base_netname
 
     if test.test_mode == 'SPRT':
         lower, elo, upper = OpenBench.stats.Elo(test.results())

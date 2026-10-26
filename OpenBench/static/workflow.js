@@ -22,11 +22,13 @@ const WF_PORT_COLORS = {
 const WF_FIELDS = {
     SPRT : [
         ['dev',             'Dev',            'branch, sha, or @trigger.dev'],
-        ['dev_bench',       'Dev Bench',      'Autofill'],
+        ['dev_bench',       'Dev Bench',      'Autofill, or from the reference'],
         ['dev_options',     'Dev Options',    'Overrides, e.g. Hash=16'],
+        ['dev_network',     'Dev Network',    '#network'],
         ['base',            'Base',           'branch, sha, or @trigger.base'],
-        ['base_bench',      'Base Bench',     'Autofill'],
+        ['base_bench',      'Base Bench',     'Autofill, or from the reference'],
         ['base_options',    'Base Options',   'Overrides, e.g. Hash=16'],
+        ['base_network',    'Base Network',   '#network'],
         ['time_control',    'Time Control',   '@dev_time_control'],
         ['test_bounds',     'Bounds',         '@test_bounds'],
         ['test_confidence', 'Confidence',     '@test_confidence'],
@@ -36,8 +38,9 @@ const WF_FIELDS = {
     ],
     SPSA : [
         ['dev',                    'Branch',       'branch, sha, or @trigger.dev'],
-        ['dev_bench',              'Bench',        'Autofill'],
+        ['dev_bench',              'Bench',        'Autofill, or from the reference'],
         ['dev_options',            'Options',      'Overrides, e.g. Hash=16'],
+        ['dev_network',            'Network',      '#network'],
         ['time_control',           'Time Control', '@dev_time_control'],
         ['spsa_inputs',            'SPSA Inputs',  'name, int, value, min, max, c_end, r_end'],
         ['spsa_iterations',        'Iterations',   ''],
@@ -192,6 +195,14 @@ function wf_node_summary(key) {
         lines.push(count + ' params, ' + (wf_value(config, 'spsa_iterations') || '?') + ' iterations');
     }
 
+    // Only Networks chosen on the Node itself, since the defaults apply everywhere else
+    const nets = ['dev_network', 'base_network'].filter(field => wf_value(config, field)).map(field => {
+        const value = wf_value(config, field);
+        return (field == 'dev_network' ? 'Dev' : 'Base') + ' net: ' + (value.toLowerCase() == 'none' ? 'none' : wf_network_name(value));
+    });
+    if (nets.length && !config.existing_test)
+        lines.push(nets.join(', '));
+
     return lines;
 }
 
@@ -245,6 +256,9 @@ function wf_render_node(key) {
 
         if (live.detail)
             body.append(wf_el('div', 'wf-node-detail', live.detail));
+
+        for (const line of wf_bench_lines(live))
+            body.append(wf_el('div', 'wf-node-bench', line));
 
         if (live.error)
             body.append(wf_el('div', 'wf-node-error', live.error));
@@ -534,6 +548,11 @@ function wf_render_node_editor(panel, key, node) {
 
     for (const [field, label, placeholder] of WF_FIELDS[node.kind]) {
 
+        if (placeholder == '#network') {
+            panel.append(wf_panel_row(label, wf_network_select(config, field)));
+            continue;
+        }
+
         const input = field == 'spsa_inputs' ? wf_el('textarea') : wf_el('input');
         input.value       = wf_value(config, field);
         input.placeholder = wf_placeholder(placeholder);
@@ -552,6 +571,48 @@ function wf_render_node_editor(panel, key, node) {
     const button = wf_el('button', 'anchorbutton btn-red w-100 mt-2', 'Remove Node');
     button.onclick = () => wf_delete_selection();
     panel.append(button);
+}
+
+function wf_bench_lines(live) {
+
+    // Benches that workers measured for a Test they stopped, see views.bench_state()
+    return Object.entries(live.bench || {}).map(([side, bench]) =>
+        'Workers measured ' + (side == 'dev' ? 'Dev' : 'Base') + ' Bench ' + bench.measured.join(' / ') + ' (given ' + bench.given + ')');
+}
+
+function wf_network_name(sha) {
+    const network = ((typeof networks != 'undefined' && networks) || []).find(net => net.sha256 == sha);
+    return network ? network.name : sha;
+}
+
+function wf_network_select(config, field) {
+
+    // Nets of the engine in the defaults. Empty keeps the default, or the net of a referenced engine
+    const side    = field.startsWith('base') ? 'base' : 'dev';
+    const engine  = wf_default_value(side + '_engine');
+    const current = wf_value(config, field);
+    const select  = wf_el('select');
+
+    const fallback = wf_default_value(side + '_network');
+    const choices  = [['', 'Default (' + (fallback ? wf_network_name(fallback) : 'None') + ')'], ['none', 'None']];
+
+    for (const network of ((typeof networks != 'undefined' && networks) || []))
+        if (network.engine == engine)
+            choices.push([network.sha256, network.name + (network.default ? ' (default)' : '')]);
+
+    // Keep a net that is no longer listed, rather than silently dropping it
+    if (current && !choices.some(([value]) => value == current))
+        choices.push([current, current]);
+
+    for (const [value, text] of choices) {
+        const option = wf_el('option', '', text);
+        option.value = value;
+        option.selected = value == current;
+        select.append(option);
+    }
+
+    select.addEventListener('change', () => { config[field] = select.value; wf_render(); });
+    return select;
 }
 
 function wf_render_node_details(panel, key, node) {
@@ -575,9 +636,17 @@ function wf_render_node_details(panel, key, node) {
     row('Started by', live.trigger ? wf_label(live.trigger) : '');
     row('Error', live.error);
 
-    for (const [field, label] of WF_FIELDS[node.kind])
-        if (field != 'spsa_inputs')
+    for (const [field, label] of WF_FIELDS[node.kind]) {
+
+        if (field == 'spsa_inputs')
+            continue;
+
+        // Networks as tested, by name, falling back to what the Node asked for
+        if (field.endsWith('_network'))
+            row(label, (live.test && live.test[field.replace('_network', '_netname')]) || wf_value(config, field));
+        else
             row(label, wf_value(config, field));
+    }
 
     row('Elo', live.test && live.test.elo);
     row('Decided on', live.detail);
@@ -600,6 +669,15 @@ function wf_render_node_details(panel, key, node) {
 
     if (live.state == 'ERROR')
         panel.append(wf_action_form('retry', key, null, 'Retry', 'btn-yellow'));
+
+    // One click to retry with the Bench the workers measured, unless they disagree on it
+    const benches = Object.values(live.bench || {});
+    if (benches.length && !config.existing_test) {
+        if (benches.every(bench => bench.measured.length == 1))
+            panel.append(wf_action_form('fixbench', key, null, 'Use measured Bench and restart', 'btn-preset'));
+        else
+            panel.append(wf_el('p', 'wf-help', 'Workers measured different Benches, so check the build by hand.'));
+    }
 
     if (live.state == 'ERROR' || live.state == 'STOPPED') {
         panel.append(wf_el('p', 'wf-help', 'Restart the Test to continue, or decide this Node by hand:'));

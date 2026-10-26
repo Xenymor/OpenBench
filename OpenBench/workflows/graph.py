@@ -64,6 +64,10 @@ PORTS = {
 # Ports that fire with every outcome of a kind, in addition to the outcome itself
 ALWAYS = { 'SPRT' : ['done'] }
 
+def outcomes(kind):
+    # Ports that a Node of this kind can finish with, as opposed to those that always fire
+    return [port for port in PORTS[kind] if port not in ALWAYS.get(kind, [])]
+
 # Engine fields of each kind, and which reference targets each kind provides
 ENGINES    = { 'SPRT' : ['dev', 'base'], 'SPSA' : ['dev'], 'JOIN' : [], 'IF' : [] }
 REF_FIELDS = { 'SPRT' : ['dev', 'base'], 'SPSA' : ['dev', 'tuned'], 'JOIN' : [], 'IF' : [] }
@@ -78,6 +82,29 @@ MAX_TEST_ID  = 2 ** 31 - 1
 
 # Edge states, as seen from the Node they point to
 FIRED, NOT_TAKEN, SKIPPED, PENDING = 'FIRED', 'NOT_TAKEN', 'SKIPPED', 'PENDING'
+
+def bench_override(config, side):
+
+    # A Bench given on the Node, or None to autofill it, or carry it over from a reference.
+    # Thousands separators are dropped, as when a Bench is read from a commit message.
+    value = str(config.get('%s_bench' % (side), '') or '').strip()
+    value = value.replace(',', '').replace('_', '').replace(' ', '')
+    return None if value.lower() in ['', 'autofill'] else value
+
+def network_changed(graph, config, side):
+
+    # Whether a Node picks another Network than the one its engine would otherwise use.
+    # A reference keeps the Network it was tested with, so any choice may be another one.
+    value = str(config.get('%s_network' % (side), '') or '').strip()
+    if not value:
+        return False
+
+    if parse_ref(config.get(side)):
+        return True
+
+    chosen  = '' if value.lower() == 'none' else value
+    default = str(graph['defaults'].get('%s_network' % (side), '') or '').strip()
+    return chosen != default
 
 def parse_ref(value):
 
@@ -253,6 +280,15 @@ def validate_node(graph, key, node):
     for field in ENGINES[node['kind']]:
 
         value = str(config.get(field, '')).strip()
+        bench = bench_override(config, field)
+
+        if bench is not None and not (bench.isdigit() and int(bench) > 0):
+            errors.append('%s: %s Bench must be a positive number, or empty to autofill it' % (name, field.title()))
+
+        # A Bench belongs to a commit and a Network. Both the Bench in a commit message and the
+        # one a reference carries over were measured with another Network than the Node picks.
+        if network_changed(graph, config, field) and bench is None:
+            errors.append('%s: %s picks its own Network, so its Bench with that Network must be given' % (name, field.title()))
 
         if not (ref := parse_ref(value)):
             if not BRANCH_PATTERN.match(value):

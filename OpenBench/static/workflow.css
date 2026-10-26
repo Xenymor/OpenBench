@@ -138,6 +138,11 @@
     color: var(--color-font1);
 }
 
+#content .wf-node-bench {
+    margin-top: 4px;
+    color: #EFF891;
+}
+
 #content .wf-node-detail {
     margin-top: 4px;
     color: var(--color-font2);
@@ -225,6 +230,7 @@
 }
 
 #content .wf-panel input,
+#content .wf-panel select,
 #content .wf-panel textarea {
     width: 100%;
     box-sizing: border-box;

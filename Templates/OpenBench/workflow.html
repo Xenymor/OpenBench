@@ -8,9 +8,13 @@
 
     {{ workflow.graph|json_script:"json-graph" }}
     {{ state|json_script:"json-state" }}
+    {{ networks|json_script:"json-networks" }}
 
     <link rel="stylesheet" href="{% static 'workflow.css' %}?{{ static_version }}">
     <script src="{% static 'workflow.js' %}?{{ static_version }}"></script>
+
+    <!-- Names of the Networks that Nodes picked, as the editor gets them through create_workload.js -->
+    <script>var networks = JSON.parse(document.getElementById('json-networks').textContent);</script>
 
     <script>
         document.addEventListener(

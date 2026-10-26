@@ -166,6 +166,14 @@
                     <label for="workload_size"> Workload Size </label> <input class="wf-default" value="32" id="workload_size">
                 </div>
                 <div class="row">
+                    <label for="notify"> Discord </label>
+                    <select class="wf-default" id="notify">
+                        <option selected value="attention"> Attention and finished </option>
+                        <option value="all"> Every SPRT and SPSA too </option>
+                        <option value="off"> Off </option>
+                    </select>
+                </div>
+                <div class="row">
                     <label for="syzygy_wdl"> Syzygy WDL </label>
                     <select class="wf-default" id="syzygy_wdl">
                         <option selected value="DISABLED"> Disabled </option>
