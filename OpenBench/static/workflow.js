@@ -76,6 +76,11 @@ const WF_IF_HELP =
     'elo_lower > 0. Nodes after an IF may still use @trigger, which refers to the Node that ' +
     'started the IF.';
 
+const WF_COPY_HELP =
+    'Shift+click picks several Nodes. Ctrl+C copies the picked or selected Nodes with the edges ' +
+    'between them, and Ctrl+V pastes them, also into the editor of another Workflow. References ' +
+    'between copied Nodes point to the copies. Esc clears the picked Nodes.';
+
 const WF_JOIN_HELP =
     'Waits until every incoming edge is decided. Fires "all" if every one of them fired, ' +
     '"some" if at least one did, and "none" otherwise. Edges from skipped Nodes are not ' +
@@ -87,12 +92,17 @@ const WF_REF_HELP =
     '@<key>.dev, @<key>.base, @<key>.tuned. Options of a reference are inherited, and the Options ' +
     'field only adds overrides.';
 
+// Copied Nodes are kept in the browser, so that they can be pasted into another Workflow's editor
+const WF_CLIPBOARD = 'openbench-workflow-clipboard';
+
 let wf = {
     graph     : { defaults : {}, nodes : {}, edges : [] },
     editable  : false,
     locked    : new Set(), // Nodes of a running Workflow that have started, and can no longer change
     state     : null,  // Live state of each Node, only in the view
     selected  : null,  // { node : key } or { edge : index }
+    picked    : new Set(), // Nodes picked with Shift+click, to be copied, pasted or removed together
+    clipboard : null,  // Last copy, for when the browser does not keep it
     canvas    : null,
     svg       : null,
     panel     : null,
@@ -224,6 +234,9 @@ function wf_render_node(key) {
 
     if (wf.selected && wf.selected.node == key)
         element.classList.add('wf-selected');
+
+    if (wf.picked.has(key))
+        element.classList.add('wf-picked');
 
     const head = wf_el('div', 'wf-node-head');
     head.append(wf_el('span', 'wf-node-label', wf_label(key)));
@@ -474,11 +487,15 @@ function wf_render_panel() {
     const panel = wf.panel;
     while (panel.firstChild) panel.removeChild(panel.firstChild);
 
+    if (wf.picked.size > 1)
+        return wf_render_picked_panel(panel);
+
     if (!wf.selected) {
         panel.append(wf_el('h3', '', wf.editable ? 'Workflow Editor' : 'Workflow'));
         panel.append(wf_el('p', 'wf-help', wf.editable
             ? 'Add Nodes with the buttons above. Drag a Node by its header, and drag from an output on its right onto another Node to connect them. Click a Node or an edge to edit or remove it.'
             : 'Click a Node to see its details.'));
+        panel.append(wf_el('p', 'wf-help', WF_COPY_HELP));
         panel.append(wf_el('p', 'wf-help', WF_REF_HELP));
         return;
     }
@@ -508,6 +525,35 @@ function wf_render_panel() {
         wf_render_node_editor(panel, key, node);
     else
         wf_render_node_details(panel, key, node);
+}
+
+function wf_render_picked_panel(panel) {
+
+    const count = wf.picked.size;
+    panel.append(wf_el('h3', '', count + ' Nodes picked'));
+    panel.append(wf_el('p', 'wf-help', [...wf.picked].map(wf_label).join(', ')));
+    panel.append(wf_el('p', 'wf-help', WF_COPY_HELP));
+    wf_copy_buttons(panel);
+
+    if (wf.editable) {
+        const button = wf_el('button', 'anchorbutton btn-red w-100 mt-1', 'Remove ' + count + ' Nodes');
+        button.onclick = () => wf_delete_selection();
+        panel.append(button);
+    }
+}
+
+function wf_copy_buttons(panel) {
+
+    // Copy works everywhere, so that a running Workflow can serve as a template. Duplicate only in the editor
+    const copy = wf_el('button', 'anchorbutton btn-blue w-100 mt-2', 'Copy');
+    copy.onclick = () => wf_copy();
+    panel.append(copy);
+
+    if (wf.editable) {
+        const duplicate = wf_el('button', 'anchorbutton btn-blue w-100 mt-1', 'Duplicate');
+        duplicate.onclick = () => wf_paste(wf_clip_of(wf_copy_keys()));
+        panel.append(duplicate);
+    }
 }
 
 function wf_render_locked_editor(panel, key, node) {
@@ -568,7 +614,9 @@ function wf_render_node_editor(panel, key, node) {
         panel.append(wf_panel_row(label, input));
     }
 
-    const button = wf_el('button', 'anchorbutton btn-red w-100 mt-2', 'Remove Node');
+    wf_copy_buttons(panel);
+
+    const button = wf_el('button', 'anchorbutton btn-red w-100 mt-1', 'Remove Node');
     button.onclick = () => wf_delete_selection();
     panel.append(button);
 }
@@ -652,6 +700,9 @@ function wf_render_node_details(panel, key, node) {
     row('Decided on', live.detail);
     row('Tuned', live.tuned);
     panel.append(table);
+
+    // A locked Node in the editor gets its buttons from wf_render_locked_editor() as well
+    wf_copy_buttons(panel);
 
     if (config.spsa_inputs) {
         panel.append(wf_el('h4', '', 'SPSA Inputs'));
@@ -768,7 +819,24 @@ function wf_rename(old_key, new_key) {
 
 function wf_delete_selection() {
 
-    if (!wf.editable || !wf.selected)
+    if (!wf.editable)
+        return;
+
+    if (wf.picked.size > 1) {
+
+        const removable = [...wf.picked].filter(key => !wf.locked.has(key));
+        if (removable.length < wf.picked.size)
+            alert('Nodes that have already started stay, the others are removed');
+
+        for (const key of removable)
+            delete wf.graph.nodes[key];
+        wf.graph.edges = wf.graph.edges.filter(edge => edge.from in wf.graph.nodes && edge.to in wf.graph.nodes);
+
+        wf.picked.clear();
+        return wf_select(null);
+    }
+
+    if (!wf.selected)
         return;
 
     if (wf.selected.edge !== undefined) {
@@ -810,6 +878,141 @@ function wf_connect(from, port, to) {
     wf_select({ node : to });
 }
 
+function wf_copy_keys() {
+    if (wf.picked.size)
+        return [...wf.picked];
+    return wf.selected && wf.selected.node ? [wf.selected.node] : [];
+}
+
+function wf_clip_of(keys) {
+
+    // The Nodes, and only the edges between them, as a detached copy
+    const set = new Set(keys);
+    return JSON.parse(JSON.stringify({
+        nodes : Object.fromEntries(keys.map(key => [key, wf.graph.nodes[key]])),
+        edges : wf.graph.edges.filter(edge => set.has(edge.from) && set.has(edge.to)),
+    }));
+}
+
+function wf_copy() {
+
+    const keys = wf_copy_keys();
+    if (!keys.length)
+        return;
+
+    wf.clipboard = wf_clip_of(keys);
+    try { localStorage.setItem(WF_CLIPBOARD, JSON.stringify(wf.clipboard)); } catch (error) {}
+    wf_flash('Copied ' + keys.length + (keys.length == 1 ? ' Node' : ' Nodes'));
+}
+
+function wf_read_clipboard() {
+    try {
+        const stored = JSON.parse(localStorage.getItem(WF_CLIPBOARD));
+        if (stored && stored.nodes) return stored;
+    } catch (error) {}
+    return wf.clipboard;
+}
+
+function wf_free_key(key, taken) {
+
+    // The same key if it is free, as when pasting into another Workflow, otherwise key_2, key_3, ...
+    if (!(key in wf.graph.nodes) && !taken.has(key))
+        return key;
+
+    for (let index = 2; ; index++) {
+        const candidate = key.slice(0, 31 - String(index).length) + '_' + index;
+        if (!(candidate in wf.graph.nodes) && !taken.has(candidate))
+            return candidate;
+    }
+}
+
+function wf_remap(config, mapping) {
+
+    // References between the copied Nodes point to the copies, all others stay as they were
+    for (const field of ['dev', 'base']) {
+        const ref = typeof config[field] == 'string' && config[field].trim().match(/^@([A-Za-z0-9_-]{1,32})\.(dev|base|tuned)$/);
+        if (ref && mapping[ref[1]])
+            config[field] = '@' + mapping[ref[1]] + '.' + ref[2];
+    }
+
+    if (typeof config.condition == 'string')
+        config.condition = config.condition.replace(/(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,32})\.([A-Za-z_]+)/g,
+            (all, before, key, variable) => before + (mapping[key] || key) + '.' + variable);
+
+    if (mapping[config.source])
+        config.source = mapping[config.source];
+}
+
+function wf_paste(clip) {
+
+    if (!wf.editable)
+        return;
+
+    // The clipboard comes from the browser's storage, so only well-formed Nodes are taken
+    clip = clip || wf_read_clipboard();
+    const keys = Object.keys((clip && clip.nodes) || {}).filter(key =>
+        /^[A-Za-z0-9_-]{1,32}$/.test(key) && clip.nodes[key] && WF_PORTS[clip.nodes[key].kind]);
+
+    if (!keys.length)
+        return wf_flash('Nothing to paste, copy Nodes first');
+
+    if (Object.keys(wf.graph.nodes).length + keys.length > 64)
+        return alert('A Workflow may have at most 64 Nodes');
+
+    const taken = new Set(), mapping = {};
+    for (const key of keys) {
+        mapping[key] = wf_free_key(key, taken);
+        taken.add(mapping[key]);
+    }
+
+    let attached = false;
+    for (const key of keys) {
+
+        const node  = JSON.parse(JSON.stringify(clip.nodes[key]));
+        node.config = node.config || {};
+
+        // A Test belongs to one Node only, so a copy runs a Test of its own
+        if (node.config.existing_test) {
+            delete node.config.existing_test;
+            attached = true;
+        }
+
+        wf_remap(node.config, mapping);
+
+        if (mapping[key] != key)
+            node.label = ((node.label || key) + ' (copy)').slice(0, 64);
+
+        node.x = Math.min(Math.max(0, Number(node.x) || 0) + 40, 99000);
+        node.y = Math.min(Math.max(0, Number(node.y) || 0) + 40, 99000);
+        wf.graph.nodes[mapping[key]] = node;
+    }
+
+    for (const edge of Array.isArray(clip.edges) ? clip.edges : [])
+        if (edge && edge.from in mapping && edge.to in mapping)
+            wf.graph.edges.push({ from : mapping[edge.from], port : edge.port, to : mapping[edge.to] });
+
+    wf.picked = new Set(keys.length > 1 ? Object.values(mapping) : []);
+    wf_select(keys.length == 1 ? { node : mapping[keys[0]] } : null);
+    wf_flash('Pasted ' + keys.length + (keys.length == 1 ? ' Node' : ' Nodes')
+        + (attached ? ', without their attached Tests, so give them their engines' : ''));
+}
+
+function wf_flash(text) {
+
+    // A short note at the bottom of the page, for actions that have no other visible result
+    let note = document.getElementById('wf-flash');
+    if (!note) {
+        note = wf_el('div', 'wf-flash');
+        note.id = 'wf-flash';
+        document.body.append(note);
+    }
+
+    note.textContent = text;
+    note.hidden = false;
+    clearTimeout(wf_flash.timer);
+    wf_flash.timer = setTimeout(() => note.hidden = true, 3500);
+}
+
 function wf_canvas_point(event) {
     const origin = wf.canvas.getBoundingClientRect();
     return { x : event.clientX - origin.left, y : event.clientY - origin.top };
@@ -821,12 +1024,38 @@ function wf_mousedown(event) {
     const port_element = event.target.closest('.wf-port-out');
 
     if (!node_element) {
-        if (event.target == wf.canvas || event.target == wf.svg)
+        if (event.target == wf.canvas || event.target == wf.svg) {
+            wf.picked.clear();
             wf_select(null);
+        }
         return;
     }
 
     const key = node_element.dataset.key;
+
+    // Shift+click picks Nodes, in the editor and in the view, starting with the one already selected
+    if (event.shiftKey) {
+        event.preventDefault();
+        if (!wf.picked.size && wf.selected && wf.selected.node)
+            wf.picked.add(wf.selected.node);
+        if (wf.picked.has(key)) wf.picked.delete(key); else wf.picked.add(key);
+        wf_render();
+        return wf_render_panel();
+    }
+
+    // Dragging one of the picked Nodes moves all of them, as after pasting a group
+    if (wf.picked.has(key) && wf.editable && event.target.closest('.wf-node-head')) {
+        event.preventDefault();
+        const point = wf_canvas_point(event);
+        wf.drag = { type : 'move', keys : [...wf.picked], x : point.x, y : point.y, clicked : key,
+                    start : Object.fromEntries([...wf.picked].map(key => [key, [wf.graph.nodes[key].x, wf.graph.nodes[key].y]])) };
+        return;
+    }
+
+    if (wf.picked.size) {
+        wf.picked.clear();
+        wf.selected = null; // So that wf_select() below redraws the panel
+    }
 
     if (port_element && wf.editable) {
         event.preventDefault();
@@ -839,7 +1068,7 @@ function wf_mousedown(event) {
         event.preventDefault();
         const point = wf_canvas_point(event);
         const node  = wf.graph.nodes[key];
-        wf.drag = { type : 'move', key : key, dx : point.x - node.x, dy : point.y - node.y };
+        wf.drag = { type : 'move', keys : [key], x : point.x, y : point.y, start : { [key] : [node.x, node.y] } };
     }
 
     if (!wf.selected || wf.selected.node != key)
@@ -854,12 +1083,14 @@ function wf_mousemove(event) {
     const point = wf_canvas_point(event);
 
     if (wf.drag.type == 'move') {
-        const node = wf.graph.nodes[wf.drag.key];
-        node.x = Math.max(0, Math.round((point.x - wf.drag.dx) / 10) * 10);
-        node.y = Math.max(0, Math.round((point.y - wf.drag.dy) / 10) * 10);
-        const element = wf.canvas.querySelector('.wf-node[data-key="' + wf.drag.key + '"]');
-        element.style.left = node.x + 'px';
-        element.style.top  = node.y + 'px';
+        for (const key of wf.drag.keys) {
+            const node = wf.graph.nodes[key], [x, y] = wf.drag.start[key];
+            node.x = Math.max(0, Math.round((x + point.x - wf.drag.x) / 10) * 10);
+            node.y = Math.max(0, Math.round((y + point.y - wf.drag.y) / 10) * 10);
+            const element = wf.canvas.querySelector('.wf-node[data-key="' + key + '"]');
+            element.style.left = node.x + 'px';
+            element.style.top  = node.y + 'px';
+        }
         wf_render_edges();
     }
 
@@ -883,12 +1114,42 @@ function wf_mouseup(event) {
         if (node) return wf_connect(drag.from, drag.port, node.dataset.key);
     }
 
+    // A click on a picked Node, without moving the group, selects that Node alone
+    if (drag.clicked && drag.keys.every(key => wf.graph.nodes[key].x == drag.start[key][0] && wf.graph.nodes[key].y == drag.start[key][1])) {
+        wf.picked.clear();
+        return wf_select({ node : drag.clicked });
+    }
+
     wf_render();
 }
 
 function wf_keydown(event) {
+
     const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
-    if (!typing && (event.key == 'Delete' || event.key == 'Backspace') && wf.selected) {
+    const text   = window.getSelection && !window.getSelection().isCollapsed; // Copying text from the page
+    const mod    = event.ctrlKey || event.metaKey;
+    const letter = (event.key || '').toLowerCase();
+
+    if (typing)
+        return;
+
+    if (mod && letter == 'c' && !text && wf_copy_keys().length) {
+        event.preventDefault();
+        wf_copy();
+    }
+
+    else if (mod && letter == 'v' && wf.editable) {
+        event.preventDefault();
+        wf_paste();
+    }
+
+    else if (event.key == 'Escape' && wf.picked.size) {
+        wf.picked.clear();
+        wf_render();
+        wf_render_panel();
+    }
+
+    else if ((event.key == 'Delete' || event.key == 'Backspace') && (wf.selected || wf.picked.size)) {
         event.preventDefault();
         wf_delete_selection();
     }
@@ -986,6 +1247,7 @@ function wf_init_editor(clone_graph, edit) {
         element.addEventListener('change', () => { wf_render(); wf_render_panel(); });
 
     document.getElementById('wf-submit').onclick = wf_submit;
+    document.getElementById('wf-paste').onclick  = () => wf_paste();
 
     wf_render();
     wf_render_panel();

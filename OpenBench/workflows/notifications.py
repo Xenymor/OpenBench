@@ -27,12 +27,15 @@
 # Without that file, nothing is sent. The site is optional, and only used for links.
 #
 # runner.step() collects what happened, and hands it to notify() once its transaction
-# has committed, so that nothing is announced that was rolled back. The message is then
-# posted from a short-lived thread, so that Discord never slows down a step.
+# has committed, so that nothing is announced that was rolled back. Every finished Test,
+# and every Node that needs attention, gets a message of its own, while the end of a
+# Workflow is one summary. They are posted in order from a short-lived thread, so that
+# Discord never slows down a step.
 
 import os
 import re
 import threading
+import time
 import traceback
 
 import requests
@@ -44,12 +47,13 @@ CREDENTIALS = os.path.join(PROJECT_PATH, 'Config', 'credentials.discord')
 # Only Discord's own webhook endpoints, so the file can never point the server elsewhere
 WEBHOOK_PATTERN = re.compile(r'^https://(?:discord|discordapp)\.com/api/webhooks/\d+/[A-Za-z0-9_-]+$')
 
-# Per Workflow, in its defaults. Missing means 'attention', as for Workflows from before
+# Per Workflow, in its defaults. Missing means 'all', as for Workflows from before
 LEVELS = ['off', 'attention', 'all']
 
 COLORS = { 'attention' : 0xEFF891, 'finished' : 0x76D576, 'passed' : 0x76D576, 'failed' : 0xFA9696, 'done' : 0x60F0FF }
 
-TIMEOUT = 10 # Seconds
+TIMEOUT    = 10 # Seconds, per message
+MAX_WAIT   = 10 # Seconds to wait when Discord asks to slow down, before trying once more
 
 def read_config(path=None):
 
@@ -69,8 +73,8 @@ def read_config(path=None):
     return { 'webhook' : webhook, 'site' : site if site.startswith('https://') or site.startswith('http://') else '' }
 
 def level(graph):
-    value = str(graph.get('defaults', {}).get('notify', '') or 'attention')
-    return value if value in LEVELS else 'attention'
+    value = str(graph.get('defaults', {}).get('notify', '') or 'all')
+    return value if value in LEVELS else 'all'
 
 def embed(kind, title, lines, url=''):
 
@@ -80,41 +84,53 @@ def embed(kind, title, lines, url=''):
         entry['url'] = url
     return entry
 
-def build_message(workflow, events, site=''):
-
-    # events are ( kind, line ), as collected by runner.step(). One message per step,
-    # with one embed per kind of event, at most the ten that Discord allows.
-    url    = '%s/workflow/%d/' % (site, workflow.id) if site else ''
-    name   = '#%d %s' % (workflow.id, workflow.name)
-    titles = {
-        'attention' : '%s needs attention',
-        'finished'  : '%s finished',
-        'passed'    : '%s: passed',
-        'failed'    : '%s: failed',
-        'done'      : '%s: done',
-    }
-
-    grouped = {}
-    for kind, line in events:
-        grouped.setdefault(kind, []).append(line)
-
-    embeds = [embed(kind, titles.get(kind, '%s') % (name), lines, url) for kind, lines in grouped.items()][:10]
-
+def message(entry):
     # Labels and branch names are typed by users, so they must never ping anyone
-    return { 'username' : 'OpenBench', 'embeds' : embeds, 'allowed_mentions' : { 'parse' : [] } }
+    return { 'username' : 'OpenBench', 'embeds' : [entry], 'allowed_mentions' : { 'parse' : [] } }
 
-def deliver(webhook, message):
-    try:
-        response = requests.post(webhook, json=message, timeout=TIMEOUT)
-        if response.status_code >= 400:
-            print('Discord rejected a Workflow notification: %d %s' % (response.status_code, response.text[:200]))
-    except Exception:
-        traceback.print_exc()
+def build_messages(workflow, events, site=''):
+
+    # events are ( kind, label, text ), as collected by runner.step(). One message
+    # per Node, and one summary for a finished Workflow.
+    url   = '%s/workflow/%d/' % (site, workflow.id) if site else ''
+    name  = '#%d %s' % (workflow.id, workflow.name)
+    words = { 'attention' : 'needs attention', 'passed' : 'passed', 'failed' : 'failed', 'done' : 'done' }
+
+    messages = []
+    for kind, label, text in events:
+        if kind in words:
+            messages.append(message(embed(kind, '%s · %s %s' % (name, label, words[kind]), [text], url)))
+
+    if summary := ['%s: %s' % (label, text) for kind, label, text in events if kind == 'finished']:
+        messages.append(message(embed('finished', '%s finished' % (name), summary, url)))
+
+    return messages
+
+def post(webhook, payload):
+
+    # Discord answers 429 with how long to wait, when many messages arrive at once
+    response = requests.post(webhook, json=payload, timeout=TIMEOUT)
+
+    if response.status_code == 429:
+        try: wait = float(response.json().get('retry_after', 1))
+        except Exception: wait = 1
+        time.sleep(min(max(wait, 0), MAX_WAIT))
+        response = requests.post(webhook, json=payload, timeout=TIMEOUT)
+
+    if response.status_code >= 400:
+        print('Discord rejected a Workflow notification: %d %s' % (response.status_code, response.text[:200]))
+
+def deliver(webhook, messages):
+
+    # In order, and one failure never keeps the others from being sent
+    for payload in messages:
+        try: post(webhook, payload)
+        except Exception: traceback.print_exc()
 
 def notify(workflow, events):
 
     if not events or not (config := read_config()):
         return
 
-    message = build_message(workflow, events, config['site'])
-    threading.Thread(target=deliver, args=(config['webhook'], message), daemon=True).start()
+    messages = build_messages(workflow, events, config['site'])
+    threading.Thread(target=deliver, args=(config['webhook'], messages), daemon=True).start()

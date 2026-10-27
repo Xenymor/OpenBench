@@ -53,7 +53,12 @@ def workflows(request):
     query   = Workflow.objects.defer('graph').order_by('-id').annotate(
         total=Count('nodes'), done=Count('nodes', filter=decided))[:200]
 
-    rows = [{ 'workflow' : workflow, 'done' : workflow.done, 'total' : workflow.total } for workflow in query]
+    # Deleting is offered where it is allowed, as for the other actions in modify_workflow()
+    profile = enabled_profile(request)
+    rows    = [{ 'workflow' : workflow, 'done' : workflow.done, 'total' : workflow.total,
+                 'can_delete' : bool(profile and (profile.approver or workflow.author == request.user.username)) }
+               for workflow in query]
+
     return OpenBench.views.render(request, 'workflows.html', { 'rows' : rows })
 
 def new_workflow(request):
@@ -153,6 +158,11 @@ def workflow(request, pk, action=None):
     query = Workflow.objects.defer('graph') if action == 'state' else Workflow.objects
 
     if not (workflow := query.filter(id=pk).first()):
+
+        # The editor and the polled state read JSON, which a redirect would only confuse
+        if action in ['state', 'edit'] and (action == 'state' or request.method == 'POST'):
+            return JsonResponse({ 'errors' : ['This Workflow no longer exists'] }, status=404)
+
         return OpenBench.views.redirect(request, '/workflows/', error='No such Workflow exists')
 
     if action == 'state':
@@ -192,6 +202,11 @@ def modify_workflow(request, workflow, action):
 
     if not profile.approver and workflow.author != request.user.username:
         return OpenBench.views.redirect(request, target, error='You cannot interact with another user\'s Workflow')
+
+    # Deleting is the one action left once a Workflow is over
+    if action == 'delete':
+        runner.delete(workflow.id, request.user.username)
+        return OpenBench.views.redirect(request, '/workflows/', status='Workflow #%d was deleted' % (workflow.id))
 
     if workflow.is_final():
         return OpenBench.views.redirect(request, target, error='The Workflow is already %s' % (workflow.status))

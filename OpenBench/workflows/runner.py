@@ -645,7 +645,9 @@ def step(workflow_id):
 
     with transaction.atomic():
 
-        workflow = Workflow.objects.select_for_update().get(id=workflow_id)
+        # Deleted in the meantime, for example while the watcher went through its list
+        if not (workflow := Workflow.objects.select_for_update().filter(id=workflow_id).first()):
+            return None
 
         if workflow.is_final():
             return workflow
@@ -694,25 +696,23 @@ def step(workflow_id):
 
     return workflow
 
-def result_line(workflow, key, node):
-
-    label = Graph.label(workflow.graph, key)
+def result_text(node):
 
     if node.state == State.SKIPPED:
-        return '%s: skipped' % (label)
+        return 'skipped'
 
     if node.kind == 'SPRT' and node.test:
         lower, elo, upper = OpenBench.stats.Elo(node.test.results())
-        return '%s: %s, Elo %+.2f ± %.2f, %d games' % (label, node.outcome, elo, max(upper - elo, elo - lower), node.test.games)
+        return '%s, Elo %+.2f ± %.2f, %d games' % (node.outcome, elo, max(upper - elo, elo - lower), node.test.games)
 
     if node.kind == 'SPSA' and node.tuned:
-        return '%s: %s, %s' % (label, node.outcome, node.tuned[:300])
+        return '%s, %s' % (node.outcome, node.tuned[:300])
 
-    return '%s: %s' % (label, node.outcome or node.state.lower())
+    return node.outcome or node.state.lower()
 
 def collect_events(workflow, nodes, states, status):
 
-    # What happened during one step, as ( kind, line ) for notifications.notify().
+    # What happened during one step, as ( kind, label, text ) for notifications.notify().
     # states and status are from before the step, so each change is announced once.
     level  = notifications.level(workflow.graph)
     events = []
@@ -726,13 +726,13 @@ def collect_events(workflow, nodes, states, status):
         label   = Graph.label(workflow.graph, key)
 
         if changed and node.state in [State.STOPPED, State.ERROR]:
-            events.append(('attention', '%s: %s' % (label, node.error or node.state.lower())))
+            events.append(('attention', label, node.error or node.state.lower()))
 
         if changed and level == 'all' and node.state == State.FINISHED and node.kind in ['SPRT', 'SPSA']:
-            events.append((node.outcome, result_line(workflow, key, node)))
+            events.append((node.outcome, label, result_text(node)))
 
     if workflow.status == Status.FINISHED and status != Status.FINISHED:
-        events += [('finished', result_line(workflow, key, node)) for key, node in nodes.items()]
+        events += [('finished', Graph.label(workflow.graph, key), result_text(node)) for key, node in nodes.items()]
 
     return events
 
@@ -749,6 +749,13 @@ def set_paused(workflow_id, paused):
 
     return step(workflow_id)
 
+def stop_tests(workflow, username):
+    for node in workflow.nodes.filter(state=State.RUNNING).select_related('test'):
+        if node.test and not node.test.finished:
+            node.test.finished = True
+            node.test.save()
+            LogEvent.objects.create(author=username, summary='STOP', log_file='', test_id=node.test.id)
+
 def abort(workflow_id, username):
 
     # Stops every Test that is still running, and never starts anything again
@@ -757,14 +764,18 @@ def abort(workflow_id, username):
         workflow = Workflow.objects.select_for_update().get(id=workflow_id)
         workflow.status = Status.ABORTED
         workflow.save()
-
-        for node in workflow.nodes.filter(state=State.RUNNING).select_related('test'):
-            if node.test and not node.test.finished:
-                node.test.finished = True
-                node.test.save()
-                LogEvent.objects.create(author=username, summary='STOP', log_file='', test_id=node.test.id)
+        stop_tests(workflow, username)
 
     return workflow
+
+def delete(workflow_id, username):
+
+    # Removes the Workflow and its Nodes for good. Their Tests stay, as ordinary Tests,
+    # but are stopped first if they still run, since nothing would follow them anymore.
+    with transaction.atomic():
+        workflow = Workflow.objects.select_for_update().get(id=workflow_id)
+        stop_tests(workflow, username)
+        workflow.delete()
 
 def retry(workflow_id, key):
 

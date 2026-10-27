@@ -53,6 +53,7 @@
         <button class="anchorbutton btn-blue" id="wf-add-SPSA"><i class="fa-solid fa-plus"></i> SPSA</button>
         <button class="anchorbutton btn-blue" id="wf-add-JOIN"><i class="fa-solid fa-plus"></i> JOIN</button>
         <button class="anchorbutton btn-blue" id="wf-add-IF"><i class="fa-solid fa-plus"></i> IF</button>
+        <button class="anchorbutton btn-blue" id="wf-paste" title="Ctrl+V"><i class="fa-solid fa-paste"></i> Paste</button>
         {% if not edit.state %}
             <button class="anchorbutton btn-yellow" id="wf-example">Example</button>
         {% endif %}
@@ -168,8 +169,8 @@
                 <div class="row">
                     <label for="notify"> Discord </label>
                     <select class="wf-default" id="notify">
-                        <option selected value="attention"> Attention and finished </option>
-                        <option value="all"> Every SPRT and SPSA too </option>
+                        <option selected value="all"> Every SPRT and SPSA too </option>
+                        <option value="attention"> Attention and finished </option>
                         <option value="off"> Off </option>
                     </select>
                 </div>

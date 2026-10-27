@@ -97,6 +97,12 @@
     border-color: #8BBAD6;
 }
 
+#content .wf-node.wf-picked {
+    border-color: #8BBAD6;
+    border-style: dashed;
+    box-shadow: 0 0 0 3px rgba(139, 186, 214, 0.25);
+}
+
 #content .wf-node-head {
     display: flex;
     justify-content: space-between;
@@ -322,6 +328,37 @@
     font-family: 'Font Awesome 6 Free';
     font-weight: 900;
     margin-left: 6px;
+}
+
+#content .wf-inline {
+    display: inline;
+}
+
+#content .wf-icon-button {
+    background: none;
+    border: none;
+    color: var(--color-font2);
+    cursor: pointer;
+    padding: 2px 6px;
+}
+
+#content .wf-icon-button:hover {
+    color: #FA9696;
+}
+
+/* Short notes after copying and pasting, outside of #content so they always stay in view */
+.wf-flash {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    z-index: 20;
+    padding: 10px 16px;
+    border-radius: 4px;
+    background-color: #1C2D40;
+    color: #DBDEE1;
+    font-family: "Courier Prime", serif;
+    font-size: 14px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
 }
 
 @media (max-width: 900px) {

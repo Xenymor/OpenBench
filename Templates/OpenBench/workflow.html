@@ -66,6 +66,14 @@
         {% endif %}
 
         <a class="anchorbutton btn-blue" href="/workflow/new/?clone={{ workflow.id }}">Clone</a>
+
+        {% if can_modify %}
+            <form method="POST" action="/workflow/{{ workflow.id }}/delete/"
+                  onsubmit="return confirm('Delete this Workflow for good?{% if not workflow.is_final %} Its running Tests are stopped.{% endif %} The Tests themselves stay.');">
+                {% csrf_token %}
+                <button class="anchorbutton btn-red" type="submit" title="Delete the Workflow"><i class="fa-solid fa-trash"></i></button>
+            </form>
+        {% endif %}
     </div>
 
     <div class="wf-layout">

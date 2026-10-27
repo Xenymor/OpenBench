@@ -141,14 +141,37 @@ class NotificationTests(SimpleTestCase):
         self.assertEqual(self.config_from('webhook=%s\nsite=javascript:alert(1)' % (self.WEBHOOK))['site'], '')
         self.assertIsNone(notifications.read_config(os.path.join(tempfile.gettempdir(), 'does-not-exist.discord')))
 
-    def test_messages_never_ping_anyone(self):
+    def test_one_message_per_node(self):
 
         workflow = Workflow(id=12, name='@everyone LMR')
-        message  = notifications.build_message(workflow, [('attention', 'ab: Stopped'), ('finished', 'ab: passed')], 'https://bench.example.com')
+        events   = [('passed', 'STC', 'passed, Elo +4.66 ± 4.49, 12600 games'), ('failed', 'Killers', 'failed, Elo -3.10 ± 4.20, 9000 games'),
+                    ('attention', 'LTC', 'Stopped by a worker'), ('finished', 'STC', 'passed'), ('finished', 'LTC', 'skipped')]
+        messages = notifications.build_messages(workflow, events, 'https://bench.example.com')
 
-        self.assertEqual(message['allowed_mentions'], { 'parse' : [] })
-        self.assertEqual([embed['title'] for embed in message['embeds']], ['#12 @everyone LMR needs attention', '#12 @everyone LMR finished'])
-        self.assertEqual(message['embeds'][0]['url'], 'https://bench.example.com/workflow/12/')
+        # Every Test on its own, even when they finished together, and one summary at the end
+        titles = [message['embeds'][0]['title'] for message in messages]
+        self.assertEqual(titles, ['#12 @everyone LMR · STC passed', '#12 @everyone LMR · Killers failed',
+                                  '#12 @everyone LMR · LTC needs attention', '#12 @everyone LMR finished'])
+        self.assertEqual(messages[0]['embeds'][0]['description'], 'passed, Elo +4.66 ± 4.49, 12600 games')
+        self.assertEqual(messages[3]['embeds'][0]['description'], 'STC: passed\nLTC: skipped')
+
+        # A label may contain ': ' itself, which must not split it
+        title = notifications.build_messages(workflow, [('passed', 'LMR: A/B', 'passed, Elo +1')])[0]['embeds'][0]
+        self.assertEqual((title['title'], title['description']), ('#12 @everyone LMR · LMR: A/B passed', 'passed, Elo +1'))
+
+        # Labels and names are typed by users, so they never ping anyone
+        for message in messages:
+            self.assertEqual(message['allowed_mentions'], { 'parse' : [] })
+            self.assertEqual(message['embeds'][0]['url'], 'https://bench.example.com/workflow/12/')
+
+    def test_waiting_when_discord_asks(self):
+
+        answers, waits, sent = [mock.Mock(status_code=429, json=lambda: { 'retry_after' : 2.5 }), mock.Mock(status_code=204)], [], []
+        with mock.patch.object(notifications.requests, 'post', lambda url, json, timeout: sent.append(json) or answers.pop(0)), \
+             mock.patch.object(notifications.time, 'sleep', waits.append):
+            notifications.post(self.WEBHOOK, { 'embeds' : [] })
+
+        self.assertEqual((len(sent), waits), (2, [2.5]))
 
     def test_delivery(self):
 
@@ -156,17 +179,17 @@ class NotificationTests(SimpleTestCase):
         with mock.patch.object(notifications, 'read_config', lambda: { 'webhook' : self.WEBHOOK, 'site' : '' }), \
              mock.patch.object(notifications.requests, 'post', lambda url, json, timeout: sent.append((url, json)) or mock.Mock(status_code=204)), \
              mock.patch.object(notifications.threading, 'Thread', lambda target, args, daemon: mock.Mock(start=lambda: target(*args))):
-            notifications.notify(Workflow(id=1, name='A'), [('attention', 'x: broken')])
+            notifications.notify(Workflow(id=1, name='A'), [('attention', 'x', 'broken'), ('passed', 'y', 'passed, Elo +1')])
             notifications.notify(Workflow(id=1, name='A'), [])
 
-        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(sent), 2)
         self.assertEqual(sent[0][0], self.WEBHOOK)
-        self.assertEqual(sent[0][1]['embeds'][0]['description'], 'x: broken')
+        self.assertEqual([payload['embeds'][0]['description'] for url, payload in sent], ['broken', 'passed, Elo +1'])
 
         # Not set up: nothing is sent at all
         with mock.patch.object(notifications, 'read_config', lambda: None), \
              mock.patch.object(notifications.requests, 'post', lambda *args, **kwargs: self.fail('Must not post')):
-            notifications.notify(Workflow(id=1, name='A'), [('attention', 'x: broken')])
+            notifications.notify(Workflow(id=1, name='A'), [('attention', 'x', 'broken')])
 
 class GraphTests(SimpleTestCase):
 
@@ -1019,23 +1042,25 @@ class RunnerTests(TestCase):
         # A Node that cannot start is announced once, not on every later step
         graph = { 'defaults' : {}, 'nodes' : { 'a' : node('SPRT', dev='nobench', base='main') }, 'edges' : [] }
         workflow, sent = self.capture_notifications(lambda: self.create(graph))
-        self.assertEqual([kind for events in sent for kind, line in events], ['attention'])
-        self.assertIn('Unable to parse a Bench', sent[0][0][1])
+        self.assertEqual([kind for events in sent for kind, label, text in events], ['attention'])
+        self.assertIn('Unable to parse a Bench', sent[0][0][2])
 
         _, sent = self.capture_notifications(lambda: runner.step(workflow.id))
         self.assertEqual(sent, [])
 
         # The end of a Workflow lists every Node
-        workflow, sent = self.capture_notifications(lambda: self.create(condition_graph()))
+        graph = condition_graph()
+        graph['defaults'] = { 'notify' : 'attention' }
+        workflow, sent = self.capture_notifications(lambda: self.create(graph))
         self.assertEqual(sent, [])
 
         self.set_penta(self.nodes(workflow)['ab'].test, (120, 300, 500, 300, 100), passed=False)
         workflow, sent = self.capture_notifications(lambda: runner.step(workflow.id))
-        self.assertEqual(sent, []) # Only attention and the end, by default
+        self.assertEqual(sent, []) # Only attention and the end, at this level
 
         self.finish_sprt(self.nodes(workflow)['no'].test, passed=True)
         workflow, sent = self.capture_notifications(lambda: runner.step(workflow.id))
-        lines = [line for kind, line in sent[0] if kind == 'finished']
+        lines = ['%s: %s' % (label, text) for kind, label, text in sent[0] if kind == 'finished']
         self.assertEqual(workflow.status, 'FINISHED')
         self.assertTrue(lines[0].startswith('ab: failed, Elo -5.26'))
         self.assertIn('yes: skipped', lines)
@@ -1045,12 +1070,51 @@ class RunnerTests(TestCase):
         graph = condition_graph()
         graph['nodes']['ab']['config']['notify'] = 'ignored' # Only the defaults count
 
-        for notify, expected in [('all', ['failed']), ('off', [])]:
+        # Every finished Test is announced, unless the Workflow says otherwise
+        for notify, expected in [('', ['failed']), ('all', ['failed']), ('attention', []), ('off', [])]:
             graph['defaults'] = { 'notify' : notify }
             workflow = self.create(graph)
             self.set_penta(self.nodes(workflow)['ab'].test, (120, 300, 500, 300, 100), passed=False)
             _, sent = self.capture_notifications(lambda: runner.step(workflow.id))
-            self.assertEqual([kind for events in sent for kind, line in events], expected, notify)
+            self.assertEqual([kind for events in sent for kind, label, text in events], expected, notify)
+
+    def test_deleting_workflows(self):
+
+        workflow = self.create(example_graph())
+        test     = self.nodes(workflow)['ab'].test
+
+        # Only the author or an approver, as for the other actions
+        other = User.objects.create_user('Other', password='x')
+        Profile.objects.create(user=other, enabled=True, approver=False)
+        self.client.force_login(other)
+        self.client.post('/workflow/%d/delete/' % (workflow.id))
+        self.assertTrue(Workflow.objects.filter(id=workflow.id).exists())
+
+        self.client.force_login(self.user)
+        self.client.get('/workflow/%d/delete/' % (workflow.id)) # Never through a link
+        self.assertTrue(Workflow.objects.filter(id=workflow.id).exists())
+
+        response = self.client.post('/workflow/%d/delete/' % (workflow.id))
+        self.assertRedirects(response, '/workflows/', fetch_redirect_response=False)
+
+        # Gone with its Nodes, while its Test stays, stopped since nothing follows it anymore
+        self.assertFalse(Workflow.objects.filter(id=workflow.id).exists())
+        self.assertFalse(WorkflowNode.objects.filter(workflow_id=workflow.id).exists())
+        self.assertTrue(Test.objects.get(id=test.id).finished)
+        self.assertEqual(self.client.get('/test/%d/' % (test.id)).status_code, 200)
+
+        # An editor still open on it, and the polling page, are told so in JSON
+        response = self.client.post('/workflow/%d/edit/' % (workflow.id), '{}', content_type='application/json')
+        self.assertEqual((response.status_code, response.json()['errors']), (404, ['This Workflow no longer exists']))
+        self.assertEqual(self.client.get('/workflow/%d/state/' % (workflow.id)).status_code, 404)
+        self.assertEqual(self.client.get('/workflow/%d/' % (workflow.id)).status_code, 302)
+
+        # Finished Workflows can be deleted as well, and the watcher skips what is gone
+        workflow = self.create({ 'defaults' : {}, 'nodes' : { 'a' : node('SPRT', dev='a', base='main') }, 'edges' : [] })
+        runner.abort(workflow.id, 'Xenymor')
+        self.client.post('/workflow/%d/delete/' % (workflow.id))
+        self.assertFalse(Workflow.objects.filter(id=workflow.id).exists())
+        self.assertIsNone(runner.step(workflow.id))
 
     def test_settings_are_verified_at_creation(self):
 
