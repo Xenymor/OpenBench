@@ -92,6 +92,14 @@ const WF_REF_HELP =
     '@<key>.dev, @<key>.base, @<key>.tuned. Options of a reference are inherited, and the Options ' +
     'field only adds overrides.';
 
+const WF_PRESET_HELP =
+    'Loads a preset of the Dev engine, like STC or LTC, as the buttons of the Test form do. Its ' +
+    'values replace the defaults for this Node only, and the fields below still override them. ' +
+    'Its Options also apply to engines that are references. Pick it again to reload a changed preset.';
+
+// Preset fields a Node never takes over, as PRESET_EXCLUDED in graph.py: the Node picks its engines itself
+const WF_PRESET_SKIP = /^(?:(?:dev|base)_(?:engine|repo|network|branch|bench|name)|test_mode|test_max_games|notify)$/;
+
 // Copied Nodes are kept in the browser, so that they can be pasted into another Workflow's editor
 const WF_CLIPBOARD = 'openbench-workflow-clipboard';
 
@@ -140,9 +148,41 @@ function wf_default_value(field) {
     return (wf.graph.defaults || {})[field] || '';
 }
 
-function wf_placeholder(placeholder) {
+function wf_preset_values_of(config) {
+    // Pasted Nodes come from the browser's storage, so a malformed preset must not break the editor
+    const values = config && config.preset_values;
+    return values && typeof values == 'object' && !Array.isArray(values) ? values : {};
+}
+
+function wf_preset_value(config, field) {
+    const values = wf_preset_values_of(config);
+    return Object.hasOwn(values, field) ? String(values[field]) : '';
+}
+
+function wf_node_default(config, field) {
+    // What an empty field of the Node falls back to: its preset, then the Workflow's defaults
+    return wf_preset_value(config, field) || wf_default_value(field);
+}
+
+function wf_preset_field(field) {
+    // The field of a preset that a field of a Node falls back to
+    return field == 'time_control' ? 'dev_time_control' : field;
+}
+
+function wf_placeholder(placeholder, config, field) {
+
+    // A field that the Node's preset sets shows its value. Options only add overrides to it
+    const preset = field ? wf_preset_value(config, wf_preset_field(field)) : '';
+
+    if (preset && field.endsWith('_options'))
+        return 'Preset: ' + preset + ', plus overrides';
+
+    if (preset)
+        return 'Preset ' + config.preset + ': ' + preset;
+
     if (!placeholder.startsWith('@'))
         return placeholder;
+
     const value = wf_default_value(placeholder.slice(1));
     return value ? 'Default: ' + value : '';
 }
@@ -195,14 +235,17 @@ function wf_node_summary(key) {
 
     else if (node.kind == 'SPRT') {
         lines.push((wf_value(config, 'dev') || '?') + ' vs ' + (wf_value(config, 'base') || '?'));
-        lines.push((wf_value(config, 'time_control') || wf_default_value('dev_time_control'))
-            + ' ' + (wf_value(config, 'test_bounds') || wf_default_value('test_bounds')));
+        lines.push((config.preset ? config.preset + ' · ' : '')
+            + (wf_value(config, 'time_control') || wf_node_default(config, 'dev_time_control'))
+            + ' ' + (wf_value(config, 'test_bounds') || wf_node_default(config, 'test_bounds')));
     }
 
     else if (node.kind == 'SPSA') {
         const count = wf_value(config, 'spsa_inputs').split('\n').filter(line => line.trim()).length;
         lines.push(wf_value(config, 'dev') || '?');
-        lines.push(count + ' params, ' + (wf_value(config, 'spsa_iterations') || '?') + ' iterations');
+        lines.push(count + ' params, ' + (wf_value(config, 'spsa_iterations') || wf_preset_value(config, 'spsa_iterations') || '?') + ' iterations');
+        if (config.preset)
+            lines.push(config.preset + ' · ' + (wf_value(config, 'time_control') || wf_node_default(config, 'dev_time_control')));
     }
 
     // Only Networks chosen on the Node itself, since the defaults apply everywhere else
@@ -592,6 +635,14 @@ function wf_render_node_editor(panel, key, node) {
 
     wf_ref_suggestions(key);
 
+    if (node.kind == 'SPRT' || node.kind == 'SPSA') {
+        panel.append(wf_panel_row('Preset', wf_preset_select(node)));
+        if (config.preset) {
+            panel.append(wf_el('p', 'wf-help', WF_PRESET_HELP));
+            panel.append(wf_el('p', 'wf-help', wf_preset_text(config) || 'This preset sets nothing a Node can use.'));
+        }
+    }
+
     for (const [field, label, placeholder] of WF_FIELDS[node.kind]) {
 
         if (placeholder == '#network') {
@@ -601,7 +652,7 @@ function wf_render_node_editor(panel, key, node) {
 
         const input = field == 'spsa_inputs' ? wf_el('textarea') : wf_el('input');
         input.value       = wf_value(config, field);
-        input.placeholder = wf_placeholder(placeholder);
+        input.placeholder = wf_placeholder(placeholder, config, field);
 
         if (field == 'spsa_inputs') input.rows = 8;
         if (field == 'dev' || field == 'base') input.setAttribute('list', 'wf-refs');
@@ -619,6 +670,113 @@ function wf_render_node_editor(panel, key, node) {
     const button = wf_el('button', 'anchorbutton btn-red w-100 mt-1', 'Remove Node');
     button.onclick = () => wf_delete_selection();
     panel.append(button);
+}
+
+function wf_presets(kind, engine) {
+    // Presets of an engine for a kind of Node, as create_preset_buttons() lists them
+    const presets = ((typeof engines != 'undefined' && engines[engine]) || {})[kind == 'SPSA' ? 'tune_presets' : 'test_presets'] || {};
+    return Object.fromEntries(Object.entries(presets).filter(([name]) => name != 'default'));
+}
+
+function wf_preset_values(kind, name) {
+
+    // Only the preset's own fields, since the defaults hold those of 'default' already,
+    // with both_ given to each engine of the Node, as apply_preset() does in the Test form
+    const dev    = wf_default_value('dev_engine');
+    const base   = wf_default_value('base_engine');
+    const preset = wf_presets(kind, dev)[name] || {};
+    const sides  = kind == 'SPSA' ? ['dev'] : ['dev', 'base'];
+    const values = {};
+
+    for (const [field, value] of Object.entries(preset)) {
+        const targets = field.startsWith('both_') ? sides.map(side => side + field.slice(4)) : [field];
+        for (const target of targets)
+            if (!WF_PRESET_SKIP.test(target) && !(kind == 'SPSA' && target.startsWith('base_')))
+                values[target] = String(value);
+    }
+
+    // Against another engine, its own preset gives the Base Options, but with the Threads and
+    // Hash of the Dev, as retain_specific_options() does. Without one, the defaults stay.
+    if (kind == 'SPRT' && base && base != dev) {
+
+        const other   = wf_presets(kind, base)[name];
+        const options = other && (other.base_options || other.both_options);
+        delete values.base_options;
+
+        if (options) {
+            const dev_options = values.dev_options || wf_default_value('dev_options');
+            const threads     = dev_options.match(/\bThreads\s*=\s*(\d+)\b/);
+            const hash        = dev_options.match(/\bHash\s*=\s*(\d+)\b/);
+            values.base_options = String(options)
+                .replace(/\bThreads\s*=\s*\d+\b/g, match => threads ? 'Threads=' + threads[1] : match)
+                .replace(/\bHash\s*=\s*\d+\b/g,    match => hash    ? 'Hash='    + hash[1]    : match);
+        }
+    }
+
+    return values;
+}
+
+function wf_preset_text(config) {
+    return Object.entries(wf_preset_values_of(config)).map(([field, value]) => field + '=' + value).join(', ');
+}
+
+function wf_preset_select(node) {
+
+    // Loading copies the values into the Node, so that later changes to the preset do not
+    // silently change a Workflow. A preset the engine no longer has stays as it was loaded.
+    const config  = node.config;
+    const presets = wf_presets(node.kind, wf_default_value('dev_engine'));
+    const select  = wf_el('select');
+    const choices = [['', 'None, only the defaults'], ...Object.keys(presets).map(name => [name, name])];
+
+    if (config.preset && !Object.hasOwn(presets, config.preset))
+        choices.push([config.preset, config.preset + ' (as loaded)']);
+
+    for (const [value, text] of choices) {
+        const option = wf_el('option', '', text);
+        option.value    = value;
+        option.selected = value == (config.preset || '');
+        select.append(option);
+    }
+
+    select.addEventListener('change', () => {
+
+        if (!select.value) {
+            delete config.preset;
+            delete config.preset_values;
+        }
+
+        else if (Object.hasOwn(presets, select.value)) {
+
+            config.preset        = select.value;
+            config.preset_values = wf_preset_values(node.kind, select.value);
+
+            // As the buttons of the Test form overwrite fields, the preset replaces what the Node
+            // set for the same fields, like the prefilled SPSA settings. Options stay, as overrides.
+            const replaced = [];
+            for (const [field, label] of WF_FIELDS[node.kind]) {
+                if (wf_preset_value(config, wf_preset_field(field)) && !field.endsWith('_options') && wf_value(config, field)) {
+                    delete config[field];
+                    replaced.push(label);
+                }
+            }
+
+            if (replaced.length)
+                wf_flash('Loaded ' + select.value + ', in place of the Node\'s ' + replaced.join(', '));
+        }
+
+        // The SPSA settings have no defaults of the Workflow, so those that a former preset
+        // replaced come back, unless the new one sets them
+        if (node.kind == 'SPSA')
+            for (const [field, value] of Object.entries(WF_SPSA_DEFAULTS))
+                if (!wf_value(config, field) && !wf_preset_value(config, field))
+                    config[field] = value;
+
+        wf_render();
+        wf_render_panel();
+    });
+
+    return select;
 }
 
 function wf_bench_lines(live) {
@@ -683,6 +841,7 @@ function wf_render_node_details(panel, key, node) {
     row('State', live.state + (live.outcome ? ': ' + live.outcome : ''));
     row('Started by', live.trigger ? wf_label(live.trigger) : '');
     row('Error', live.error);
+    row('Preset', config.preset ? config.preset + (wf_preset_text(config) ? ': ' + wf_preset_text(config) : '') : '');
 
     for (const [field, label] of WF_FIELDS[node.kind]) {
 

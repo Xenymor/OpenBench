@@ -69,13 +69,24 @@ PLACEHOLDER = { 'branch' : 'main', 'bench' : '1' }
 class WorkflowError(Exception):
     pass
 
-def setting(graph, config, field):
+def setting(defaults, config, field):
 
-    # The Node's value, unless left empty, in which case the Workflow's default
+    # The Node's value, unless left empty, in which case the default, see node_defaults()
     value = config.get(field, '')
     if str(value).strip() == '':
-        value = graph['defaults'].get(field, '')
+        value = defaults.get(field, '')
     return str(value).strip()
+
+def node_defaults(graph, key):
+
+    # The Workflow's defaults, with the values of the preset that the Node loaded on top.
+    # Graph.validate() ensures that a preset never picks the engines, see PRESET_EXCLUDED.
+    values = graph['nodes'][key].get('config', {}).get('preset_values') or {}
+    return { **graph['defaults'], **{ field : str(value) for field, value in values.items() } }
+
+def preset_options(config, side):
+    # Options of the Node's preset, which also apply on top of those a reference inherits
+    return str((config.get('preset_values') or {}).get('%s_options' % (side), ''))
 
 def option_limit():
     return Test._meta.get_field('dev_options').max_length
@@ -94,11 +105,12 @@ def build_post(graph, key, engines):
 
     node     = graph['nodes'][key]
     config   = node.get('config', {})
-    defaults = graph['defaults']
+    defaults = node_defaults(graph, key)
 
     post = { name : str(value) for name, value in defaults.items() }
-    post.update({ field : setting(graph, config, field) for field in OVERRIDABLE })
-    post['info'] = ''
+    post.update({ field : setting(defaults, config, field) for field in OVERRIDABLE })
+    post['info']   = ''
+    post['notify'] = 'off' # The Workflow announces its Tests itself, see collect_events()
 
     # One time control for both engines, unless the Workflow's defaults differ per engine
     time_control = str(config.get('time_control', '')).strip()
@@ -134,7 +146,7 @@ def branch_engine(graph, key, side):
 
     # An engine given by its branch, which create_new_test() will resolve
     config   = graph['nodes'][key].get('config', {})
-    defaults = graph['defaults']
+    defaults = node_defaults(graph, key)
 
     return {
         'repo'    : str(defaults.get('%s_repo'    % (side), '')),
@@ -208,7 +220,8 @@ def resolve_engines(workflow, nodes, node):
                 'network' : network_override(config, side, engine['network']),
                 'branch'  : engine['sha'], # Pinned to the exact commit, so its Bench carries over,
                 'bench'   : Graph.bench_override(config, side) or engine['bench'], # unless given for another net
-                'options' : merge_options(engine['options'], str(config.get('%s_options' % (side), ''))),
+                'options' : merge_options(merge_options(engine['options'], preset_options(config, side)),
+                                          str(config.get('%s_options' % (side), ''))),
             }
 
         # Allows to name an engine that is given by its sha, as done for migrated follow-ups
@@ -282,7 +295,7 @@ def verify_option_lengths(graph, locked={}):
             if ref[1] == 'tuned':
                 inputs  = str(graph['nodes'][ref[0] if ref[0] != 'trigger' else targets[0]].get('config', {}).get('spsa_inputs', ''))
                 options = merge_options(options, estimate_tuned_options(inputs))
-            options = merge_options(options, str(config.get('%s_options' % (side), '')))
+            options = merge_options(merge_options(options, preset_options(config, side)), str(config.get('%s_options' % (side), '')))
 
         return options
 
@@ -362,7 +375,13 @@ def create_workflow(user, name, graph):
                 started  = timezone.now() if key in tests else None,
             )
 
+        silence(tests)
+
     return step(workflow.id), None
+
+def silence(tests):
+    # Attached Tests are announced by their Workflow from now on, and no longer on their own
+    Test.objects.filter(id__in=tests.values()).update(notify='off')
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 #                         EDITING A RUNNING WORKFLOW                          #
@@ -443,6 +462,8 @@ def update_workflow(workflow_id, user, name, graph):
                 row.state, row.started = State.RUNNING, timezone.now()
 
             row.save()
+
+        silence(tests)
 
         workflow.name   = name
         workflow.graph  = graph
@@ -702,8 +723,7 @@ def result_text(node):
         return 'skipped'
 
     if node.kind == 'SPRT' and node.test:
-        lower, elo, upper = OpenBench.stats.Elo(node.test.results())
-        return '%s, Elo %+.2f ± %.2f, %d games' % (node.outcome, elo, max(upper - elo, elo - lower), node.test.games)
+        return '%s, %s' % (node.outcome, notifications.test_result(node.test))
 
     if node.kind == 'SPSA' and node.tuned:
         return '%s, %s' % (node.outcome, node.tuned[:300])

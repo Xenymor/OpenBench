@@ -192,6 +192,10 @@ class Test(Model):
     upload_pgns = CharField(max_length=16, default='FALSE')
     info        = CharField(max_length=1024, default='', blank=True)
 
+    # Discord messages about this Test, see OpenBench/workflows/notifications.py.
+    # Tests of a Workflow stay 'off', since the Workflow announces them itself
+    notify      = CharField(max_length=16, default='off')
+
     # Opening book settings
     book_name  = CharField(max_length=32)
     book_index = IntegerField(default=1)

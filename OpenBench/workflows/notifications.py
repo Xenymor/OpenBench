@@ -18,7 +18,7 @@
 #                                                                             #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-# Discord messages about Workflows, sent through a webhook. Configured by the file
+# Discord messages about Workflows, and about single Tests, sent through a webhook. Configured by the file
 # Config/credentials.discord, which is never committed (see .gitignore):
 #
 #   webhook=https://discord.com/api/webhooks/<id>/<token>
@@ -31,7 +31,12 @@
 # and every Node that needs attention, gets a message of its own, while the end of a
 # Workflow is one summary. They are posted in order from a short-lived thread, so that
 # Discord never slows down a step.
+#
+# Tests created through the form choose for themselves, in Test.notify: 'all' announces
+# their result and when a worker stops them, 'attention' only the latter. Tests of a
+# Workflow keep 'off', since the Workflow announces them already.
 
+import functools
 import os
 import re
 import threading
@@ -40,6 +45,8 @@ import traceback
 
 import requests
 
+import OpenBench.stats
+
 from OpenSite.settings import PROJECT_PATH
 
 CREDENTIALS = os.path.join(PROJECT_PATH, 'Config', 'credentials.discord')
@@ -47,7 +54,8 @@ CREDENTIALS = os.path.join(PROJECT_PATH, 'Config', 'credentials.discord')
 # Only Discord's own webhook endpoints, so the file can never point the server elsewhere
 WEBHOOK_PATTERN = re.compile(r'^https://(?:discord|discordapp)\.com/api/webhooks/\d+/[A-Za-z0-9_-]+$')
 
-# Per Workflow, in its defaults. Missing means 'all', as for Workflows from before
+# Per Workflow, in its defaults. Missing means 'all', as for Workflows from before.
+# Per Test as well, where missing means 'off', as for Tests from before.
 LEVELS = ['off', 'attention', 'all']
 
 COLORS = { 'attention' : 0xEFF891, 'finished' : 0x76D576, 'passed' : 0x76D576, 'failed' : 0xFA9696, 'done' : 0x60F0FF }
@@ -75,6 +83,9 @@ def read_config(path=None):
 def level(graph):
     value = str(graph.get('defaults', {}).get('notify', '') or 'all')
     return value if value in LEVELS else 'all'
+
+def test_level(value):
+    return value if value in LEVELS else 'off'
 
 def embed(kind, title, lines, url=''):
 
@@ -106,6 +117,20 @@ def build_messages(workflow, events, site=''):
 
     return messages
 
+def test_result(test):
+
+    # Elo and games of an SPRT, as shown for the Nodes of a Workflow as well
+    lower, elo, upper = OpenBench.stats.Elo(test.results())
+    return 'Elo %+.2f ± %.2f, %d games' % (elo, max(upper - elo, elo - lower), test.games)
+
+def build_test_messages(test, kind, text, site=''):
+
+    # kind is 'passed', 'failed' or 'done' for a result, or 'attention' for a stopped Test
+    url   = '%s/test/%d/' % (site, test.id) if site else ''
+    words = { 'attention' : 'needs attention', 'passed' : 'passed', 'failed' : 'failed', 'done' : 'finished' }
+    name  = '#%d %s vs %s (%s)' % (test.id, test.dev.name, test.base.name, test.dev_time_control)
+    return [message(embed(kind, '%s %s' % (name, words[kind]), [text], url))]
+
 def post(webhook, payload):
 
     # Discord answers 429 with how long to wait, when many messages arrive at once
@@ -127,10 +152,59 @@ def deliver(webhook, messages):
         try: post(webhook, payload)
         except Exception: traceback.print_exc()
 
-def notify(workflow, events):
+def quietly(function):
 
-    if not events or not (config := read_config()):
+    # Called from the requests of workers and users, after their changes are committed,
+    # which a broken message must never turn into an error
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        try: return function(*args, **kwargs)
+        except Exception: traceback.print_exc()
+
+    return wrapped
+
+def send(build):
+
+    # build( site ) returns the messages, once it is known that they can be sent
+    if not (config := read_config()):
         return
 
-    messages = build_messages(workflow, events, config['site'])
-    threading.Thread(target=deliver, args=(config['webhook'], messages), daemon=True).start()
+    if messages := build(config['site']):
+        threading.Thread(target=deliver, args=(config['webhook'], messages), daemon=True).start()
+
+@quietly
+def notify(workflow, events):
+    if events:
+        send(lambda site: build_messages(workflow, events, site))
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+#                                 SINGLE TESTS                                #
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+@quietly
+def test_finished(test):
+
+    # Called by update_test(), once a Test of the form has played its last games
+    if test.test_mode not in ['SPRT', 'GAMES'] or test_level(test.notify) != 'all':
+        return
+
+    if test.test_mode == 'SPRT':
+        kind = 'passed' if test.passed else 'failed'
+        text = '%s, LLR %.2f (%.2f, %.2f), bounds [%.2f, %.2f]' % (
+            test_result(test), test.currentllr, test.lowerllr, test.upperllr, test.elolower, test.eloupper)
+
+    else: # Fixed games, which only pass or fail on wins against losses
+        kind = 'done'
+        text = '%s, +%d =%d -%d' % (test_result(test), test.wins, test.draws, test.losses)
+
+    send(lambda site: build_test_messages(test, kind, text, site))
+
+@quietly
+def test_stopped(test, reason):
+
+    # Called when a worker stops a Test, for example since its Bench is wrong
+    if test.test_mode not in ['SPRT', 'GAMES'] or test_level(test.notify) == 'off':
+        return
+
+    text = ('Stopped by a worker: %s' % (reason))[:1024]
+    send(lambda site: build_test_messages(test, 'attention', text, site))

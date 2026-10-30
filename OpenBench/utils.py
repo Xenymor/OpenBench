@@ -42,6 +42,7 @@ from OpenSite.settings import MEDIA_ROOT, PROJECT_PATH
 from OpenBench.config import OPENBENCH_CONFIG, PRESET_TYPES, verify_engine_presets
 from OpenBench.models import *
 from OpenBench.stats import TrinomialSPRT, PentanomialSPRT
+from OpenBench.workflows import notifications
 
 import OpenBench.views
 import OpenBench.model_utils
@@ -611,6 +612,10 @@ def update_test(request, machine):
             test.passed = test.finished = test.games >= test.max_games
 
         test.save()
+
+        # Only the report that finished the Test gets here with it finished, so it is announced once
+        if test.finished:
+            transaction.on_commit(lambda: notifications.test_finished(test))
 
         # Update Result object; No risk from concurrent access
         Result.objects.filter(id=result_id).update(

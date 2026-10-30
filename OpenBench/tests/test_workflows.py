@@ -27,12 +27,16 @@ import os
 import re
 import tempfile
 
+from types import SimpleNamespace
 from unittest import mock
 
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 
-from OpenBench.models import Book, EngineConfig, LogEvent, Network, Profile, Test, Workflow, WorkflowNode
+import OpenBench.utils
+
+from OpenBench.config import OPENBENCH_CONFIG
+from OpenBench.models import Book, Engine, EngineConfig, LogEvent, Machine, Network, Profile, Result, ServerState, Test, Workflow, WorkflowNode
 from OpenBench.workflows import conditions
 from OpenBench.workflows import notifications
 from OpenBench.workflows import graph as Graph
@@ -190,6 +194,45 @@ class NotificationTests(SimpleTestCase):
         with mock.patch.object(notifications, 'read_config', lambda: None), \
              mock.patch.object(notifications.requests, 'post', lambda *args, **kwargs: self.fail('Must not post')):
             notifications.notify(Workflow(id=1, name='A'), [('attention', 'x', 'broken')])
+
+    def single_test(self, **fields):
+        test = Test(**{ 'id' : 7, 'test_mode' : 'SPRT', 'notify' : 'all', 'dev_time_control' : '10.0+0.10', **fields })
+        test.dev, test.base = Engine(name='@here lmr'), Engine(name='main')
+        test.LL, test.LD, test.DD, test.DW, test.WW, test.games = 120, 300, 500, 300, 100, 2640
+        return test
+
+    def sent_for_tests(self, action):
+        sent = []
+        with mock.patch.object(notifications, 'send', lambda build: sent.extend(build('https://bench.example.com'))):
+            action()
+        return [message['embeds'][0] for message in sent]
+
+    def test_single_tests(self):
+
+        # The result of an SPRT, with a link to the Test, and never pinging anyone
+        test = self.single_test(passed=True, finished=True, currentllr=2.95, lowerllr=-2.94, upperllr=2.94, eloupper=3.0)
+        sent = self.sent_for_tests(lambda: notifications.test_finished(test))
+        self.assertEqual(sent[0]['title'], '#7 @here lmr vs main (10.0+0.10) passed')
+        self.assertEqual(sent[0]['url'], 'https://bench.example.com/test/7/')
+        self.assertTrue(sent[0]['description'].startswith('Elo -5.26'))
+        self.assertIn('LLR 2.95 (-2.94, 2.94), bounds [0.00, 3.00]', sent[0]['description'])
+
+        # Fixed games only finish, and a worker stopping the Test needs attention
+        test = self.single_test(test_mode='GAMES', wins=10, draws=5, losses=3)
+        sent = self.sent_for_tests(lambda: notifications.test_finished(test))
+        self.assertEqual((sent[0]['title'][-8:], sent[0]['description'][-9:]), ('finished', '+10 =5 -3'))
+
+        sent = self.sent_for_tests(lambda: notifications.test_stopped(test, '[Fispur-ABCD] Wrong Bench: 123'))
+        self.assertEqual(sent[0]['title'][-15:], 'needs attention')
+        self.assertEqual(sent[0]['description'], 'Stopped by a worker: [Fispur-ABCD] Wrong Bench: 123')
+
+        # What each level announces. Tunes, Datagen, and Tests from before announce nothing
+        for notify, mode, expected in [('all', 'SPRT', 2), ('attention', 'SPRT', 1), ('off', 'SPRT', 0),
+                                       ('', 'SPRT', 0), ('bogus', 'SPRT', 0), ('all', 'SPSA', 0), ('all', 'DATAGEN', 0)]:
+            test = self.single_test(test_mode=mode, passed=True)
+            test.notify = notify
+            sent = self.sent_for_tests(lambda: (notifications.test_finished(test), notifications.test_stopped(test, 'x')))
+            self.assertEqual(len(sent), expected, (notify, mode))
 
 class GraphTests(SimpleTestCase):
 
@@ -1077,6 +1120,124 @@ class RunnerTests(TestCase):
             self.set_penta(self.nodes(workflow)['ab'].test, (120, 300, 500, 300, 100), passed=False)
             _, sent = self.capture_notifications(lambda: runner.step(workflow.id))
             self.assertEqual([kind for events in sent for kind, label, text in events], expected, notify)
+
+    def test_tests_of_workflows_stay_silent(self):
+
+        # The Workflow announces its Tests, so they never announce themselves too
+        workflow = self.create({ 'defaults' : { 'notify' : 'all' }, 'nodes' : { 'a' : node('SPRT', dev='a', base='main') }, 'edges' : [] })
+        test     = self.nodes(workflow)['a'].test
+        self.assertEqual(test.notify, 'off')
+
+        # Which also holds for a Test of the form, once it is attached
+        test.notify = 'all'
+        test.save()
+        WorkflowNode.objects.filter(test=test).update(test=None)
+        graph = { 'defaults' : self.defaults(), 'nodes' : { 'stc' : node('SPRT', existing_test=str(test.id)) }, 'edges' : [] }
+        self.assertIsNone(runner.create_workflow(self.user, 'Attached', graph)[1])
+        test.refresh_from_db()
+        self.assertEqual(test.notify, 'off')
+
+    def single_test(self):
+
+        # A Test as the form creates it, which announces itself, run by one Machine
+        workflow = self.create({ 'defaults' : {}, 'nodes' : { 'a' : node('SPRT', dev='a', base='main') }, 'edges' : [] })
+        test     = self.nodes(workflow)['a'].test
+        WorkflowNode.objects.filter(test=test).update(test=None)
+        Test.objects.filter(id=test.id).update(notify='all')
+
+        info    = { 'client_ver' : OPENBENCH_CONFIG['client_version'], 'OPENBENCH_CONFIG_CHECKSUM' : ServerState.checksum() }
+        machine = Machine.objects.create(user=self.user, secret='s', info=info)
+        return Test.objects.get(id=test.id), machine
+
+    def announced(self, action):
+        sent = []
+        with mock.patch.object(notifications, 'send', lambda build: sent.extend(build(''))), \
+             self.captureOnCommitCallbacks(execute=True):
+            result = action()
+        return result, [message['embeds'][0]['title'] for message in sent]
+
+    def test_single_tests_announce_once(self):
+
+        test, machine = self.single_test()
+        result = Result.objects.create(test=test, machine=machine)
+        post   = { 'crashes' : '0', 'timelosses' : '0', 'illegals' : '0', 'machine_id' : str(machine.id),
+                   'result_id' : str(result.id), 'test_id' : str(test.id), 'trinomial' : '0 0 0', 'pentanomial' : '0 100 1000 3000 1000' }
+
+        # Only the report that finishes the Test announces it, and the next ones are only told to stop
+        report = lambda: OpenBench.utils.update_test(SimpleNamespace(POST=post), machine)
+        self.assertEqual(self.announced(report)[1], ['#%d a vs main (10.0+0.10) passed' % (test.id)])
+        self.assertEqual(self.announced(report), ({ 'stop' : True }, []))
+
+        # Several workers report a wrong Bench, but only the first one stopped the Test
+        Test.objects.filter(id=test.id).update(finished=False)
+        error  = { 'machine_id' : str(machine.id), 'secret' : 's', 'test_id' : str(test.id), 'error' : '[Fispur-ABCD] Wrong Bench: 123' }
+        stop   = lambda: self.client.post('/clientBenchError/', error).json()
+        self.assertEqual(self.announced(stop), ({}, ['#%d a vs main (10.0+0.10) needs attention' % (test.id)]))
+        self.assertEqual(self.announced(stop), ({}, []))
+        self.assertTrue(Test.objects.get(id=test.id).finished)
+        self.assertEqual(LogEvent.objects.filter(test_id=test.id, summary=error['error']).count(), 2)
+
+    def test_broken_messages_never_break_workers(self):
+
+        test, machine = self.single_test()
+        error = { 'machine_id' : str(machine.id), 'secret' : 's', 'test_id' : str(test.id), 'error' : 'Wrong Bench: 1' }
+
+        with mock.patch.object(notifications, 'read_config', mock.Mock(side_effect=OSError('broken'))), \
+             mock.patch.object(notifications.traceback, 'print_exc', lambda: None):
+            self.assertEqual(self.client.post('/clientBenchError/', error).json(), {})
+
+        # The worker's report is logged all the same, which a restart with its Bench relies on
+        self.assertTrue(LogEvent.objects.filter(test_id=test.id, summary='Wrong Bench: 1').exists())
+        self.assertTrue(Test.objects.get(id=test.id).finished)
+
+    def test_presets_of_nodes(self):
+
+        # As loaded by the editor: an LTC preset, below the Node's own fields, above the defaults
+        ltc = { 'dev_time_control' : '60.0+0.6', 'base_time_control' : '60.0+0.6', 'test_bounds' : '[0.50, 2.50]',
+                'workload_size' : '8', 'dev_options' : 'Threads=1 Hash=64', 'base_options' : 'Threads=1 Hash=64' }
+        graph = {
+            'defaults' : {},
+            'nodes' : {
+                'stc' : node('SPRT', dev='x', base='main'),
+                'ltc' : node('SPRT', dev='@trigger.dev', base='main', preset='LTC', preset_values=ltc, test_confidence='[0.10, 0.05]'),
+                'own' : node('SPRT', dev='y', base='main', preset='LTC', preset_values=ltc, time_control='30+0.3', base_options='Hash=32'),
+            },
+            'edges' : [edge('stc', 'passed', 'ltc')],
+        }
+
+        workflow = self.create(graph)
+        nodes    = self.nodes(workflow)
+        own      = nodes['own'].test
+        self.assertEqual((own.dev_time_control, own.base_time_control), ('30.0+0.30', '30.0+0.30'))
+        self.assertEqual((own.elolower, own.eloupper, own.workload_size), (0.5, 2.5, 8))
+        self.assertEqual((own.dev_options, own.base_options), ('Threads=1 Hash=64', 'Threads=1 Hash=32'))
+        self.assertEqual(own.notify, 'off')
+
+        # A reference keeps its own options, with those of the preset on top
+        stc = nodes['stc'].test
+        stc.dev_options = 'Threads=1 Hash=8 LMR=3'
+        stc.save()
+        self.finish_sprt(stc, passed=True)
+        ltc_test = self.nodes(runner.step(workflow.id))['ltc'].test
+        self.assertEqual(ltc_test.dev_options, 'Threads=1 Hash=64 LMR=3')
+        self.assertEqual(ltc_test.dev_time_control, '60.0+0.60')
+        self.assertEqual((ltc_test.alpha, ltc_test.beta), (0.05, 0.10))
+
+        # A preset may never pick the engines, nor be anything but plain fields
+        for values, error in [({ 'dev_branch' : 'other' }, 'cannot set "dev_branch"'), ({ 'dev_network' : 'x' }, 'cannot set "dev_network"'),
+                              ({ 'test_mode' : 'GAMES' }, 'cannot set "test_mode"'), ('LTC', 'Malformed preset'),
+                              ({ 'x y' : '1' }, 'Malformed preset field'), ({ 'priority' : ['1'] }, 'Malformed preset field'),
+                              ({ 'f%d' % (index) : '1' for index in range(33) }, 'more than 32 fields'),
+                              ({ 'dev_options' : 'Hash=1 ' * 600 }, 'exceeds 4096 characters')]:
+            broken = copy.deepcopy(graph)
+            broken['nodes']['own']['config']['preset_values'] = values
+            self.assertTrue(any(error in found for found in Graph.validate(broken)), (values, Graph.validate(broken)))
+
+        # And whatever it sets is verified as the form would
+        broken = copy.deepcopy(graph)
+        broken['nodes']['own']['config']['preset_values'] = { 'workload_size' : 'many' }
+        broken['defaults'] = self.defaults()
+        self.assertTrue(any(error.startswith('own: "Workload Size" is not an Integer') for error in runner.create_workflow(self.user, 'X', broken)[1]))
 
     def test_deleting_workflows(self):
 

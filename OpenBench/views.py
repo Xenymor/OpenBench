@@ -29,6 +29,7 @@ import OpenBench.model_utils
 import OpenBench.spsa_utils
 import OpenBench.utils
 
+from OpenBench.workflows import notifications
 from OpenBench.workloads.create_workload import create_workload
 from OpenBench.workloads.get_workload import get_workload
 from OpenBench.workloads.modify_workload import modify_workload
@@ -819,9 +820,10 @@ def client_get_workload(request, machine):
 @verify_worker
 def client_bench_error(request, machine):
 
-    # Find and stop the test with the bad bench
-    test = Test.objects.get(id=int(request.POST['test_id']))
-    test.finished = True; test.save()
+    # Find and stop the test with the bad bench. Every worker that ran the Test reports it,
+    # at about the same time, and the one whose update stops it is the first one
+    test    = Test.objects.select_related('dev', 'base').get(id=int(request.POST['test_id']))
+    running = Test.objects.filter(id=test.id, finished=False).update(finished=True, updated=timezone.now())
 
     # Log the error into the Events table
     LogEvent.objects.create(
@@ -830,6 +832,9 @@ def client_bench_error(request, machine):
         log_file   = '',
         machine_id = int(request.POST['machine_id']),
         test_id    = int(request.POST['test_id']))
+
+    if running:
+        notifications.test_stopped(test, request.POST['error'])
 
     return JsonResponse({})
 

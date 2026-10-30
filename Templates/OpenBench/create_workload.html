@@ -167,6 +167,15 @@
                         <label for="test_max_games"> Max Games </label> <input id="test_max_games" name="test_max_games">
                     </div>
 
+                    <div class="row">
+                        <label for="notify"> Discord </label>
+                        <select id="notify" name="notify">
+                            <option selected value="all"> Result and problems </option>
+                            <option value="attention"> Only problems </option>
+                            <option value="off"> Off </option>
+                        </select>
+                    </div>
+
                 {% elif workload == "TUNE" %}
 
                     <h3> SPSA Settings </h3>

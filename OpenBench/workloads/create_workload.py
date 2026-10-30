@@ -42,6 +42,7 @@ import OpenBench.views
 
 from OpenBench.config import OPENBENCH_CONFIG
 from OpenBench.models import *
+from OpenBench.workflows import notifications
 from OpenBench.workloads.verify_workload import verify_workload
 
 def create_workload(request, workload_type):
@@ -164,6 +165,7 @@ def create_new_test(request):
     test.scale_nps         = int(request.POST['scale_nps'])
 
     test.test_mode         = request.POST['test_mode']
+    test.notify            = notifications.test_level(request.POST.get('notify')) # Workflows send 'off'
 
     if test.test_mode == 'SPRT':
         sprt          = parse_sprt_fields(request.POST['test_bounds'], request.POST['test_confidence'])

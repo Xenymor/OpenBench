@@ -83,6 +83,39 @@ MAX_TEST_ID  = 2 ** 31 - 1
 # Edge states, as seen from the Node they point to
 FIRED, NOT_TAKEN, SKIPPED, PENDING = 'FIRED', 'NOT_TAKEN', 'SKIPPED', 'PENDING'
 
+# A Node may load a preset of its engine, see runner.node_defaults(). Its values are
+# fields of the workload forms, but never those that pick the engines or the test mode.
+PRESET_FIELD    = re.compile(r'^[A-Za-z][A-Za-z0-9_]{0,63}$')
+PRESET_EXCLUDED = re.compile(r'^(?:(?:dev|base|both)_(?:engine|repo|network|branch|bench|name)|test_mode|test_max_games|notify)$')
+MAX_PRESET      = 32   # Fields of one preset
+MAX_PRESET_SIZE = 4096 # Characters of one preset, since every Node keeps its own copy
+
+def validate_preset(name, config):
+
+    values = config.get('preset_values')
+    if values is None:
+        return []
+
+    if not isinstance(values, dict):
+        return ['%s: Malformed preset' % (name)]
+
+    if len(values) > MAX_PRESET:
+        return ['%s: The preset has more than %d fields' % (name, MAX_PRESET)]
+
+    if sum(len(str(field)) + len(str(value)) for field, value in values.items()) > MAX_PRESET_SIZE:
+        return ['%s: The preset exceeds %d characters' % (name, MAX_PRESET_SIZE)]
+
+    errors = []
+    for field, value in values.items():
+
+        if not PRESET_FIELD.match(str(field)) or not isinstance(value, (str, int, float)):
+            errors.append('%s: Malformed preset field "%s"' % (name, str(field)[:64]))
+
+        elif PRESET_EXCLUDED.match(field):
+            errors.append('%s: A preset cannot set "%s"' % (name, field))
+
+    return errors
+
 def bench_override(config, side):
 
     # A Bench given on the Node, or None to autofill it, or carry it over from a reference.
@@ -265,6 +298,8 @@ def validate_node(graph, key, node):
     if node['kind'] == 'SPSA':
         try: assert 0.0 < float(config.get('at_percent', 100)) <= 100.0
         except: errors.append('%s: "Done at %%" must be within (0, 100]' % (name))
+
+    errors += validate_preset(name, config)
 
     # Engines are irrelevant when attaching an existing Test
     if config.get('existing_test'):
