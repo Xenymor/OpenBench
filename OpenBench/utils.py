@@ -515,6 +515,37 @@ def engine_delete(request, config):
     config.delete()
     return OpenBench.views.redirect(request, '/manage/engines/', status='Deleted Engine %s' % (config.name))
 
+# Reported by Client/bench.py, for binaries named as in Client/utils.py:engine_binary_name()
+WRONG_BENCH = re.compile(r'^\[(?P<binary>[^\]]+)\] Wrong Bench: (?P<bench>\d+)$')
+
+def workload_sides(workload):
+
+    # Tunes share one Engine for both sides, so there is only the Dev side to bench
+    return ['dev'] if workload.dev_id == workload.base_id else ['dev', 'base']
+
+def binary_matches(binary, test, side):
+
+    # Binaries are named <engine>-<SHA>[-<network>], with .exe on Windows
+    engine  = getattr(test, side)
+    network = getattr(test, '%s_network' % (side)) or ''
+    suffix  = '-%s' % (engine.sha.upper()[:8]) + ('-%s' % (network[-8:]) if network else '')
+    return re.sub(r'\.exe$', '', binary.strip(), flags=re.IGNORECASE).upper().endswith(suffix.upper())
+
+def measured_benches(test, sides):
+
+    # { side : set of Benches } that workers measured where the Test expected another.
+    # Reports of the Bench the Test now expects are stale, from before it was corrected.
+    found  = {}
+    events = LogEvent.objects.filter(test_id=test.id, summary__contains='Wrong Bench').exclude(machine_id=0)
+
+    for summary in events.values_list('summary', flat=True):
+        if match := WRONG_BENCH.match(summary.strip()):
+            for side in sides:
+                if binary_matches(match['binary'], test, side) and int(match['bench']) != getattr(test, side).bench:
+                    found.setdefault(side, set()).add(int(match['bench']))
+
+    return found
+
 
 def update_test(request, machine):
 

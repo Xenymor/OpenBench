@@ -333,7 +333,7 @@ class LogEvent(Model):
     log_file   = CharField(max_length=128) # .log file stored in /Media/
 
     machine_id = IntegerField(default=0)   # Only set for Client based Log Events
-    test_id    = IntegerField(default=0)   # Should always be set
+    test_id    = IntegerField(default=0, db_index=True) # Should always be set
 
     created    = DateTimeField(auto_now_add=True)
 

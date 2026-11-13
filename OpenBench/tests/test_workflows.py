@@ -1043,6 +1043,55 @@ class RunnerTests(TestCase):
                                 log_file='', machine_id=7, test_id=restarted.test.id)
         self.assertEqual(runner.measured_benches(restarted.test, ['base']), {})
 
+    def test_rebench_restarts_the_workload_in_place(self):
+
+        workflow = self.create(condition_graph())
+        test     = self.nodes(workflow)['ab'].test
+        base     = test.base.bench
+        self.wrong_bench(test, 'dev', 7654321)
+        self.assertEqual(self.nodes(runner.step(workflow.id))['ab'].state, 'STOPPED')
+
+        # The Workload's own page offers the measured Bench
+        self.client.force_login(self.user)
+        page = self.client.get('/test/%d/' % (test.id))
+        self.assertEqual(page.context['bench_corrections'], { 'dev' : { 'given' : test.dev.bench, 'measured' : [7654321] } })
+        self.assertContains(page, '/test/%d/REBENCH' % (test.id))
+
+        # The same Test runs again, with the measured Bench, and the Node follows it
+        self.client.get('/test/%d/REBENCH/' % (test.id))
+        test = Test.objects.select_related('dev', 'base').get(id=test.id)
+        self.assertFalse(test.finished)
+        self.assertEqual((test.dev.bench, test.base.bench), (7654321, base))
+        self.assertTrue(LogEvent.objects.filter(test_id=test.id, summary='REBENCH').exists())
+        self.assertEqual(self.nodes(runner.step(workflow.id))['ab'].test.id, test.id)
+        self.assertEqual(self.nodes(Workflow.objects.get(id=workflow.id))['ab'].state, 'RUNNING')
+
+        # The old report is stale now, so stopping again offers nothing
+        test.finished = True
+        test.save()
+        self.assertNotContains(self.client.get('/test/%d/' % (test.id)), '/REBENCH')
+
+        # Disagreeing workers are left to be checked by hand
+        self.wrong_bench(test, 'dev', 1)
+        self.wrong_bench(test, 'dev', 2)
+        self.client.get('/test/%d/REBENCH/' % (test.id))
+        test = Test.objects.select_related('dev').get(id=test.id)
+        self.assertTrue(test.finished)
+        self.assertEqual(test.dev.bench, 7654321)
+
+    def test_rebench_of_a_tune(self):
+
+        workflow = self.create({ 'defaults' : {}, 'edges' : [], 'nodes' : { 't' : node('SPSA', dev='x', spsa_inputs='A, int, 10, 0, 20, 2, 0.002') } })
+        test     = self.nodes(workflow)['t'].test
+        self.assertEqual(test.dev_id, test.base_id)
+        self.wrong_bench(test, 'dev', 4242)
+
+        self.client.force_login(self.user)
+        self.client.get('/tune/%d/REBENCH/' % (test.id))
+        test = Test.objects.select_related('dev', 'base').get(id=test.id)
+        self.assertFalse(test.finished)
+        self.assertEqual((test.dev.bench, test.base.bench), (4242, 4242))
+
     def test_disagreeing_workers_and_other_stops(self):
 
         workflow = self.create(condition_graph())
@@ -1189,6 +1238,31 @@ class RunnerTests(TestCase):
         # The worker's report is logged all the same, which a restart with its Bench relies on
         self.assertTrue(LogEvent.objects.filter(test_id=test.id, summary='Wrong Bench: 1').exists())
         self.assertTrue(Test.objects.get(id=test.id).finished)
+
+    def test_rebench_of_a_test_stopped_by_an_older_server(self):
+
+        # A Test of the form, stopped through the worker API, as before REBENCH existed.
+        # Only what client_bench_error() always logged is needed to restart it.
+        test, machine = self.single_test()
+        binary = 'Fispur-%s.exe' % (test.dev.sha.upper()[:8])
+        for summary in ['[%s] Wrong Bench: 3141592' % (binary), '[%s] Non-Deterministic Benches' % (binary)]:
+            self.client.post('/clientBenchError/', { 'machine_id' : str(machine.id), 'secret' : 's', 'test_id' : str(test.id), 'error' : summary })
+        self.assertTrue(Test.objects.get(id=test.id).finished)
+
+        self.client.force_login(self.user)
+        self.assertContains(self.client.get('/test/%d/' % (test.id)), '/test/%d/REBENCH' % (test.id))
+        self.client.get('/test/%d/REBENCH/' % (test.id))
+
+        test = Test.objects.select_related('dev', 'base').get(id=test.id)
+        self.assertFalse(test.finished)
+        self.assertEqual(test.dev.bench, 3141592)
+
+        # A Test that finished with a result is never offered a restart, whatever was reported
+        self.client.post('/clientBenchError/', { 'machine_id' : str(machine.id), 'secret' : 's', 'test_id' : str(test.id),
+                                                 'error' : '[%s] Wrong Bench: 2718281' % (binary) })
+        test.finished, test.passed = True, True
+        test.save()
+        self.assertEqual(self.client.get('/test/%d/' % (test.id)).context['bench_corrections'], {})
 
     def test_presets_of_nodes(self):
 

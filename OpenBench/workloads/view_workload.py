@@ -35,6 +35,7 @@ from django.utils import timezone
 import OpenBench.views
 import OpenBench.stats
 from OpenBench.models import *
+from OpenBench.workloads.modify_workload import bench_corrections
 
 def view_workload(request, workload, workload_type):
 
@@ -52,6 +53,9 @@ def view_workload(request, workload, workload_type):
     if node := WorkflowNode.objects.select_related('workflow').filter(test=workload).first():
         data['workflow_node']  = node
         data['workflow_label'] = node.workflow.graph['nodes'].get(node.key, {}).get('label') or node.key
+
+    # Workers stopped the Workload for a wrong Bench, which it can be restarted with
+    data['bench_corrections'] = bench_corrections(workload)
 
     if workload_type == 'TEST':
         data['type']= workload_type

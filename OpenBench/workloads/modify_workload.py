@@ -25,6 +25,9 @@
 # requested. This will return the user to the index, or a login page, with some
 # indication as to success, or a reason for failure.
 
+from django.db import transaction
+
+import OpenBench.utils
 import OpenBench.views
 
 from OpenBench.models import *
@@ -35,6 +38,7 @@ def modify_workload(request, id, action=None):
         'APPROVE' : approve_workload, 'RESTART' : restart_workload,
         'STOP'    : stop_workload,    'DELETE'  : delete_workload,
         'RESTORE' : restore_workload, 'MODIFY'  : tweak_workload,
+        'REBENCH' : rebench_workload,
     }
 
     # Make sure the requested Action is a known one
@@ -58,13 +62,33 @@ def modify_workload(request, id, action=None):
     if action == 'APPROVE' and not profile.approver:
         return OpenBench.views.redirect(request, '/index/', error='You cannot approve this Workload')
 
-    # Make the change; Record the change; Save the change
-    message = actions[action](request, profile, workload)
-    LogEvent.objects.create(author=request.user.username, summary=action, log_file='', test_id=id)
-    workload.save()
+    # Make the change; Record the change; Save the change. All at once, since
+    # a REBENCH that was only half saved would no longer find the Bench to use
+    try:
+        with transaction.atomic():
+            message = actions[action](request, profile, workload)
+            LogEvent.objects.create(author=request.user.username, summary=action, log_file='', test_id=id)
+            workload.save()
+
+    except WorkloadActionError as error:
+        return OpenBench.views.redirect(request, '/%s/%d/' % (workload.workload_type_str(), workload.id), error=str(error))
 
     # Send back to the index, notifying them of the success
     return OpenBench.views.redirect(request, '/index/', status=message)
+
+class WorkloadActionError(Exception):
+    pass
+
+def bench_corrections(workload):
+
+    # { side : { 'given', 'measured' } } for a stopped Workload whose Bench workers disputed.
+    # Finished with a result, it has nothing to restart, so the Events are not even looked at.
+    if not workload.finished or workload.passed or workload.failed:
+        return {}
+
+    found = OpenBench.utils.measured_benches(workload, OpenBench.utils.workload_sides(workload))
+    return { side : { 'given' : getattr(workload, side).bench, 'measured' : sorted(values) }
+             for side, values in found.items() }
 
 def approve_workload(request, profile, workload):
     workload.approved = True;
@@ -74,6 +98,31 @@ def restart_workload(request, profile, workload):
     workload.finished = False;
     workload.rate_updated = None # Time spent stopped should not count towards the throughput
     return 'Workload was Restarted!'
+
+def rebench_workload(request, profile, workload):
+
+    # Restarts a Workload that workers stopped for a wrong Bench, expecting the Bench they
+    # measured from now on. Each Workload has Engines of its own, so they can be changed.
+    if not workload.finished or workload.passed or workload.failed:
+        raise WorkloadActionError('Only stopped Workloads can be restarted with a measured Bench')
+
+    if not (corrections := bench_corrections(workload)):
+        raise WorkloadActionError('No worker reported a wrong Bench for this Workload, which may be restarted as usual')
+
+    if conflicts := ['%s: %s' % (side.title(), ', '.join(map(str, info['measured'])))
+                     for side, info in corrections.items() if len(info['measured']) > 1]:
+        raise WorkloadActionError('Workers measured different Benches (%s), so check the build by hand' % ('; '.join(conflicts)))
+
+    for side, info in corrections.items():
+        engine = getattr(workload, side)
+        engine.bench = info['measured'][0]
+        engine.save()
+
+    workload.finished     = False
+    workload.rate_updated = None # Time spent stopped should not count towards the throughput
+
+    changes = ', '.join('%s %d -> %d' % (side.title(), info['given'], info['measured'][0]) for side, info in corrections.items())
+    return 'Workload was Restarted with the measured Bench (%s)!' % (changes)
 
 def stop_workload(request, profile, workload):
     workload.finished = True;

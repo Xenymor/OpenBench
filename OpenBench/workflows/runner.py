@@ -32,7 +32,6 @@
 # as the web forms, from a POST that merges the Workflow's defaults, the Node's
 # config, and the engines it refers to. So they are verified the very same way.
 
-import re
 import traceback
 
 from types import SimpleNamespace
@@ -46,6 +45,7 @@ import OpenBench.stats
 import OpenBench.views # Before the workload modules, which only import cleanly once it is loaded
 
 from OpenBench.models import LogEvent, Profile, Test, Workflow, WorkflowNode
+from OpenBench.utils import measured_benches
 from OpenBench.workflows import conditions
 from OpenBench.workflows import graph as Graph
 from OpenBench.workflows import notifications
@@ -90,9 +90,6 @@ def preset_options(config, side):
 
 def option_limit():
     return Test._meta.get_field('dev_options').max_length
-
-# Reported by Client/bench.py, for binaries named as in Client/utils.py:engine_binary_name()
-WRONG_BENCH = re.compile(r'^\[(?P<binary>[^\]]+)\] Wrong Bench: (?P<bench>\d+)$')
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 #                         BUILDING THE WORKLOAD POSTS                         #
@@ -523,28 +520,6 @@ def stop_reason(test):
     if event and 'Bench' in event.summary:
         return ('Stopped by a worker: %s' % (event.summary))[:1024]
     return 'The Test was stopped'
-
-def binary_matches(binary, test, side):
-
-    # Binaries are named <engine>-<SHA>[-<network>], with .exe on Windows
-    engine  = getattr(test, side)
-    network = getattr(test, '%s_network' % (side)) or ''
-    suffix  = '-%s' % (engine.sha.upper()[:8]) + ('-%s' % (network[-8:]) if network else '')
-    return re.sub(r'\.exe$', '', binary.strip(), flags=re.IGNORECASE).upper().endswith(suffix.upper())
-
-def measured_benches(test, sides):
-
-    # { side : set of Benches } that workers measured where the Test expected another
-    found  = {}
-    events = LogEvent.objects.filter(test_id=test.id, summary__contains='Wrong Bench').exclude(machine_id=0)
-
-    for summary in events.values_list('summary', flat=True):
-        if match := WRONG_BENCH.match(summary.strip()):
-            for side in sides:
-                if binary_matches(match['binary'], test, side):
-                    found.setdefault(side, set()).add(int(match['bench']))
-
-    return found
 
 def spsa_games_needed(workflow, node):
     config  = workflow.graph['nodes'][node.key].get('config', {})
