@@ -42,6 +42,8 @@ from OpenBench.templatetags.mytags import workload_url
 from OpenBench.workflows import graph as Graph
 from OpenBench.workflows import runner
 
+from OpenBench.workloads.modify_workload import bench_corrections
+
 def enabled_profile(request):
     if request.user.is_authenticated:
         return Profile.objects.filter(user=request.user, enabled=True).first()
@@ -252,10 +254,9 @@ def workflow_state(workflow):
 
 def bench_state(node):
 
-    # What workers measured, for a Test they stopped because of a wrong Bench
-    found = runner.measured_benches(node.test, Graph.ENGINES[node.kind])
-    return { side : { 'given' : getattr(node.test, side).bench, 'measured' : sorted(values) }
-             for side, values in found.items() } or None
+    # What workers measured, for a Test they stopped because of a wrong Bench. The same as
+    # the Test's own page offers, since both restart it with apply_measured_bench()
+    return bench_corrections(node.test) or None
 
 def test_state(test):
 

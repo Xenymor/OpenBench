@@ -1011,23 +1011,25 @@ class RunnerTests(TestCase):
         state = self.client.get('/workflow/%d/state/' % (workflow.id)).json()['nodes']['ab']['bench']
         self.assertEqual(state, { 'dev' : { 'given' : old.dev.bench, 'measured' : [1234567] } })
 
-        # One click: a new Test with that Bench, which replaces the stopped one
+        # The Test's own page offers the same
+        self.assertEqual(self.client.get('/test/%d/' % (old.id)).context['bench_corrections'], state)
+
+        # One click: the same Test runs again with that Bench, as REBENCH on its page would do
         self.client.post('/workflow/%d/fixbench/' % (workflow.id), { 'key' : 'ab' })
         node = self.nodes(Workflow.objects.get(id=workflow.id))['ab']
-        self.assertEqual(node.state, 'RUNNING')
-        self.assertNotEqual(node.test.id, old.id)
+        self.assertEqual((node.state, node.error, node.test.id), ('RUNNING', '', old.id))
         self.assertEqual((node.test.dev.bench, node.test.base.bench), (1234567, old.base.bench))
-        self.assertEqual(Workflow.objects.get(id=workflow.id).graph['nodes']['ab']['config']['dev_bench'], '1234567')
-        self.assertTrue(Test.objects.get(id=old.id).finished)
+        self.assertEqual((node.test.dev.sha, node.test.finished, node.test.deleted), (old.dev.sha, False, False))
+        self.assertTrue(LogEvent.objects.filter(test_id=old.id, summary='REBENCH', author='Xenymor').exists())
+        self.assertEqual(Test.objects.count(), 1)
 
-        # The replaced Test is deleted as its DELETE action would, so it can be restored
-        self.assertTrue(Test.objects.get(id=old.id).deleted)
-        self.assertFalse(Test.objects.get(id=node.test.id).deleted)
-        self.assertTrue(LogEvent.objects.filter(test_id=old.id, summary='DELETE', author='Xenymor').exists())
-
-        # The new Test is not taken for deleted: the Node keeps running
+        # The Node's settings are left alone, and the report is stale now, so nothing is offered
+        self.assertNotIn('dev_bench', Workflow.objects.get(id=workflow.id).graph['nodes']['ab']['config'])
         node = self.nodes(runner.step(workflow.id))['ab']
         self.assertEqual(node.state, 'RUNNING')
+
+        with self.assertRaisesRegex(runner.WorkflowError, 'Only stopped Nodes'):
+            runner.use_measured_bench(workflow.id, 'ab', 'Xenymor')
 
     def test_measured_bench_of_base_and_with_nets(self):
 
@@ -1041,11 +1043,10 @@ class RunnerTests(TestCase):
         runner.step(workflow.id)
 
         restarted = self.nodes(runner.use_measured_bench(workflow.id, 'a', 'Xenymor'))['a']
-        self.assertEqual((restarted.test.base.bench, restarted.test.base_network), (2222222, 'aaaa1111'))
+        self.assertEqual((restarted.test.id, restarted.test.base.bench, restarted.test.base_network), (old.id, 2222222, 'aaaa1111'))
         self.assertEqual(restarted.test.dev.bench, old.dev.bench)
-        self.assertTrue(Test.objects.get(id=old.id).deleted)
 
-        # The new Test has no reports of its own yet
+        # The report is of the Bench now expected, so it is stale
         self.assertEqual(runner.measured_benches(restarted.test, ['dev', 'base']), {})
 
         # A binary without the net is a different build, and is not taken for Base
@@ -1101,6 +1102,47 @@ class RunnerTests(TestCase):
         test = Test.objects.select_related('dev', 'base').get(id=test.id)
         self.assertFalse(test.finished)
         self.assertEqual((test.dev.bench, test.base.bench), (4242, 4242))
+
+    def test_measured_bench_of_tunes_attached_and_deleted_tests(self):
+
+        # A tune has one Engine for both sides, which is corrected once
+        graph    = { 'defaults' : {}, 'edges' : [],
+                     'nodes' : { 't' : node('SPSA', dev='x', spsa_inputs='A, int, 10, 0, 20, 2, 0.002') } }
+        workflow = self.create(graph)
+        tune     = self.nodes(workflow)['t'].test
+        self.wrong_bench(tune, 'dev', 4242)
+        runner.step(workflow.id)
+
+        item = self.nodes(runner.use_measured_bench(workflow.id, 't', 'Xenymor'))['t']
+        self.assertEqual((item.state, item.test.id, item.test.dev.bench, item.test.base.bench), ('RUNNING', tune.id, 4242, 4242))
+
+        # An attached Test can be corrected now as well, as on its own page
+        first = self.create({ 'defaults' : {}, 'nodes' : { 'a' : node('SPRT', dev='a', base='main') }, 'edges' : [] })
+        test  = self.nodes(first)['a'].test
+        WorkflowNode.objects.filter(test=test).update(test=None)
+        workflow, errors = runner.create_workflow(self.user, 'Attached',
+            { 'defaults' : self.defaults(), 'nodes' : { 'stc' : node('SPRT', existing_test=str(test.id)) }, 'edges' : [] })
+        self.assertIsNone(errors)
+
+        self.wrong_bench(test, 'base', 777)
+        self.assertEqual(self.nodes(runner.step(workflow.id))['stc'].state, 'STOPPED')
+        item = self.nodes(runner.use_measured_bench(workflow.id, 'stc', 'Xenymor'))['stc']
+        self.assertEqual((item.state, item.test.id, item.test.base.bench), ('RUNNING', test.id, 777))
+
+        # A deleted Test offers nothing, here or on its page, and is not restarted
+        workflow = self.create(condition_graph())
+        test     = self.nodes(workflow)['ab'].test
+        self.wrong_bench(test, 'dev', 1234567)
+        Test.objects.filter(id=test.id).update(deleted=True)
+        runner.step(workflow.id)
+
+        self.client.force_login(self.user)
+        self.assertIsNone(self.client.get('/workflow/%d/state/' % (workflow.id)).json()['nodes']['ab']['bench'])
+        self.assertEqual(self.client.get('/test/%d/' % (test.id)).context['bench_corrections'], {})
+
+        with self.assertRaisesRegex(runner.WorkflowError, 'restore it before'):
+            runner.use_measured_bench(workflow.id, 'ab', 'Xenymor')
+        self.assertTrue(Test.objects.get(id=test.id).finished)
 
     def test_disagreeing_workers_and_other_stops(self):
 

@@ -83,7 +83,8 @@ def bench_corrections(workload):
 
     # { side : { 'given', 'measured' } } for a stopped Workload whose Bench workers disputed.
     # Finished with a result, it has nothing to restart, so the Events are not even looked at.
-    if not workload.finished or workload.passed or workload.failed:
+    # Neither when deleted, since it would have to be restored first.
+    if not workload.finished or workload.passed or workload.failed or workload.deleted:
         return {}
 
     found = OpenBench.utils.measured_benches(workload, OpenBench.utils.workload_sides(workload))
@@ -100,11 +101,19 @@ def restart_workload(request, profile, workload):
     return 'Workload was Restarted!'
 
 def rebench_workload(request, profile, workload):
+    return apply_measured_bench(workload)
+
+def apply_measured_bench(workload):
 
     # Restarts a Workload that workers stopped for a wrong Bench, expecting the Bench they
     # measured from now on. Each Workload has Engines of its own, so they can be changed.
+    # Shared by the REBENCH action and by Workflows, whose Nodes then follow their Test.
+    # The caller saves the Workload and logs the REBENCH, in the same transaction.
     if not workload.finished or workload.passed or workload.failed:
         raise WorkloadActionError('Only stopped Workloads can be restarted with a measured Bench')
+
+    if workload.deleted:
+        raise WorkloadActionError('This Workload was deleted, so restore it before restarting it')
 
     if not (corrections := bench_corrections(workload)):
         raise WorkloadActionError('No worker reported a wrong Bench for this Workload, which may be restarted as usual')

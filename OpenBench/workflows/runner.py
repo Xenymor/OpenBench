@@ -52,6 +52,7 @@ from OpenBench.workflows import notifications
 from OpenBench.workflows.options import merge_options, is_option_string, estimate_tuned_options
 from OpenBench.workloads import create_workload as Create
 from OpenBench.workloads import verify_workload as Verify
+from OpenBench.workloads.modify_workload import apply_measured_bench, WorkloadActionError
 
 State  = WorkflowNode.State
 Status = Workflow.Status
@@ -789,39 +790,24 @@ def retry(workflow_id, key):
 
 def use_measured_bench(workflow_id, key, username):
 
-    # Restarts a Node whose Test the workers stopped for a wrong Bench, with the Bench they
-    # measured. A new Test is created, which replaces the stopped one, so that one is deleted.
-    # As with the DELETE action of its page, it is only marked, and can be restored from there.
+    # Restarts the stopped Test of a Node with the Bench the workers measured. Like the REBENCH
+    # action of the Test's page, this restarts the same Test, and the Node follows it, see observe().
+    # So the Test keeps its commit: a branch is not looked up again, and cannot have moved on.
     with transaction.atomic():
         workflow = Workflow.objects.select_for_update().get(id=workflow_id)
-        node     = workflow.nodes.select_related('test', 'test__dev', 'test__base').get(key=key)
-        config   = workflow.graph['nodes'][key].setdefault('config', {})
+        node     = workflow.nodes.get(key=key)
 
-        if node.state != State.STOPPED or not node.test:
+        if node.state != State.STOPPED or not node.test_id:
             raise WorkflowError('Only stopped Nodes can be restarted with a measured Bench')
 
-        if config.get('existing_test'):
-            raise WorkflowError('This Node attaches an existing Test, whose Bench it cannot change')
+        test = Test.objects.select_for_update().get(id=node.test_id)
 
-        found = measured_benches(node.test, Graph.ENGINES[node.kind])
+        try: apply_measured_bench(test)
+        except WorkloadActionError as error:
+            raise WorkflowError(str(error))
 
-        if not found:
-            raise WorkflowError('No worker reported a wrong Bench for this Test')
-
-        if conflicts := ['%s: %s' % (side.title(), ', '.join(map(str, sorted(values)))) for side, values in found.items() if len(values) > 1]:
-            raise WorkflowError('Workers measured different Benches (%s), so check the build by hand' % ('; '.join(conflicts)))
-
-        for side, values in found.items():
-            config['%s_bench' % (side)] = str(next(iter(values)))
-
-        replaced = node.test
-        node.test, node.state, node.error, node.trigger, node.started = None, State.WAITING, '', '', None
-        node.save()
-        workflow.save()
-
-        # Only the flag, since a full save() could undo what a worker wrote to the Test meanwhile
-        Test.objects.filter(id=replaced.id).update(deleted=True)
-        LogEvent.objects.create(author=username, summary='DELETE', log_file='', test_id=replaced.id)
+        test.save()
+        LogEvent.objects.create(author=username, summary='REBENCH', log_file='', test_id=test.id)
 
     return step(workflow_id)
 
