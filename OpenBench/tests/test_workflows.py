@@ -1011,7 +1011,7 @@ class RunnerTests(TestCase):
         state = self.client.get('/workflow/%d/state/' % (workflow.id)).json()['nodes']['ab']['bench']
         self.assertEqual(state, { 'dev' : { 'given' : old.dev.bench, 'measured' : [1234567] } })
 
-        # One click: a new Test with that Bench, the stopped one stays as it is
+        # One click: a new Test with that Bench, which replaces the stopped one
         self.client.post('/workflow/%d/fixbench/' % (workflow.id), { 'key' : 'ab' })
         node = self.nodes(Workflow.objects.get(id=workflow.id))['ab']
         self.assertEqual(node.state, 'RUNNING')
@@ -1019,6 +1019,15 @@ class RunnerTests(TestCase):
         self.assertEqual((node.test.dev.bench, node.test.base.bench), (1234567, old.base.bench))
         self.assertEqual(Workflow.objects.get(id=workflow.id).graph['nodes']['ab']['config']['dev_bench'], '1234567')
         self.assertTrue(Test.objects.get(id=old.id).finished)
+
+        # The replaced Test is deleted as its DELETE action would, so it can be restored
+        self.assertTrue(Test.objects.get(id=old.id).deleted)
+        self.assertFalse(Test.objects.get(id=node.test.id).deleted)
+        self.assertTrue(LogEvent.objects.filter(test_id=old.id, summary='DELETE', author='Xenymor').exists())
+
+        # The new Test is not taken for deleted: the Node keeps running
+        node = self.nodes(runner.step(workflow.id))['ab']
+        self.assertEqual(node.state, 'RUNNING')
 
     def test_measured_bench_of_base_and_with_nets(self):
 
@@ -1031,9 +1040,10 @@ class RunnerTests(TestCase):
         self.wrong_bench(old, 'base', 2222222, network='aaaa1111')
         runner.step(workflow.id)
 
-        restarted = self.nodes(runner.use_measured_bench(workflow.id, 'a'))['a']
+        restarted = self.nodes(runner.use_measured_bench(workflow.id, 'a', 'Xenymor'))['a']
         self.assertEqual((restarted.test.base.bench, restarted.test.base_network), (2222222, 'aaaa1111'))
         self.assertEqual(restarted.test.dev.bench, old.dev.bench)
+        self.assertTrue(Test.objects.get(id=old.id).deleted)
 
         # The new Test has no reports of its own yet
         self.assertEqual(runner.measured_benches(restarted.test, ['dev', 'base']), {})
@@ -1101,7 +1111,7 @@ class RunnerTests(TestCase):
         runner.step(workflow.id)
 
         with self.assertRaisesRegex(runner.WorkflowError, 'different Benches'):
-            runner.use_measured_bench(workflow.id, 'ab')
+            runner.use_measured_bench(workflow.id, 'ab', 'Xenymor')
 
         # Stopped by hand: no suggestion, and nothing to restart with
         workflow = self.create(condition_graph())
@@ -1112,7 +1122,7 @@ class RunnerTests(TestCase):
         self.assertEqual(node.error, 'The Test was stopped')
 
         with self.assertRaisesRegex(runner.WorkflowError, 'No worker reported'):
-            runner.use_measured_bench(workflow.id, 'ab')
+            runner.use_measured_bench(workflow.id, 'ab', 'Xenymor')
 
         # 'done' always fires alongside the outcome, so it is not an outcome of its own
         with self.assertRaisesRegex(runner.WorkflowError, 'cannot be decided as "done"'):

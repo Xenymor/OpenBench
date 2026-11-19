@@ -787,10 +787,11 @@ def retry(workflow_id, key):
 
     return step(workflow_id)
 
-def use_measured_bench(workflow_id, key):
+def use_measured_bench(workflow_id, key, username):
 
-    # Restarts a Node whose Test the workers stopped for a wrong Bench, with the Bench
-    # they measured. The stopped Test is left as it is, and a new one is created.
+    # Restarts a Node whose Test the workers stopped for a wrong Bench, with the Bench they
+    # measured. A new Test is created, which replaces the stopped one, so that one is deleted.
+    # As with the DELETE action of its page, it is only marked, and can be restored from there.
     with transaction.atomic():
         workflow = Workflow.objects.select_for_update().get(id=workflow_id)
         node     = workflow.nodes.select_related('test', 'test__dev', 'test__base').get(key=key)
@@ -813,9 +814,14 @@ def use_measured_bench(workflow_id, key):
         for side, values in found.items():
             config['%s_bench' % (side)] = str(next(iter(values)))
 
+        replaced = node.test
         node.test, node.state, node.error, node.trigger, node.started = None, State.WAITING, '', '', None
         node.save()
         workflow.save()
+
+        # Only the flag, since a full save() could undo what a worker wrote to the Test meanwhile
+        Test.objects.filter(id=replaced.id).update(deleted=True)
+        LogEvent.objects.create(author=username, summary='DELETE', log_file='', test_id=replaced.id)
 
     return step(workflow_id)
 

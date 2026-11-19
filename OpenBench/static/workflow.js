@@ -883,8 +883,10 @@ function wf_render_node_details(panel, key, node) {
     // One click to retry with the Bench the workers measured, unless they disagree on it
     const benches = Object.values(live.bench || {});
     if (benches.length && !config.existing_test) {
-        if (benches.every(bench => bench.measured.length == 1))
+        if (benches.every(bench => bench.measured.length == 1)) {
             panel.append(wf_action_form('fixbench', key, null, 'Use measured Bench and restart', 'btn-preset'));
+            panel.append(wf_el('p', 'wf-help', 'This deletes the stopped Test, which can be restored from its page.'));
+        }
         else
             panel.append(wf_el('p', 'wf-help', 'Workers measured different Benches, so check the build by hand.'));
     }

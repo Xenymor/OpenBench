@@ -219,7 +219,7 @@ def modify_workflow(request, workflow, action):
         elif action == 'abort'   : runner.abort(workflow.id, request.user.username)
         elif action == 'retry'   : runner.retry(workflow.id, key)
         elif action == 'resolve' : runner.resolve(workflow.id, key, request.POST.get('outcome', ''))
-        elif action == 'fixbench': runner.use_measured_bench(workflow.id, key)
+        elif action == 'fixbench': runner.use_measured_bench(workflow.id, key, request.user.username)
         else: return OpenBench.views.redirect(request, target, error='Unknown Workflow action')
 
     except WorkflowNode.DoesNotExist:
