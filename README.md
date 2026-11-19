@@ -8,3 +8,17 @@ OpenBench is the primary testing framework used for the development of [Ethereal
 You can join OpenBench's [Discord server](https://discord.com/invite/9MVg7fBTpM) to join the discussion, see what developers are working on and talking about, or to find out how you can contribute to the project and become a part of it. OpenBench is heavily inspired by [Fishtest](https://github.com/glinscott/fishtest). The project is powered by the [Django Web Framework](https://www.djangoproject.com/) and [fastchess](https://github.com/Disservin/fastchess).
 
 Documentation for OpenBench is available in the [Wiki](https://github.com/AndyGrant/OpenBench/wiki)
+
+## Updating this server
+
+After pulling new changes, run these in the server's virtual environment (`source <venv>/bin/activate`), in this order:
+
+```bash
+git pull
+python manage.py migrate
+python manage.py collectstatic --noinput
+```
+
+`collectstatic` copies the files into the `STATIC_ROOT` of the server's `OpenSite/settings.py`, the folder that the web server serves `/static/` from. The repository does not set one, so it must be set there.
+
+Only restart the server after `collectstatic`, otherwise it keeps serving the old JavaScript and CSS. Whenever a static file changes, also raise `OPENBENCH_STATIC_VERSION` in `OpenBench/config.py`, so that browsers load the new files instead of their cached copies.
