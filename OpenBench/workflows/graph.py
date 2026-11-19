@@ -42,9 +42,11 @@
 # 'source', and fires 'true' or 'false'. Variables like 'x.passed' refer to other
 # SPRTs by key, and the IF waits until each of those has finished or was skipped.
 #
-# The engines of a Node are either a branch, tag or commit sha, resolved when the
-# Node starts, or a reference '@<key>.<dev|base|tuned>' to the exact engine that
-# another Node tested. '@trigger' names the Node whose edge started this one, and
+# The engines of a Node are either a branch, tag or commit sha, or a reference
+# '@<key>.<dev|base|tuned>' to the exact engine that another Node tested. Branches
+# are pinned to their commit whenever the Workflow is saved, so that later pushes
+# change no Node that waits, unless the Node sets 'resolve_on_start', in which case
+# its branches are looked up once it starts (for branches that are pushed later). '@trigger' names the Node whose edge started this one, and
 # looks through IF Nodes to the Node that started them.
 # 'tuned' is the Dev of an SPSA, with the values frozen when it finished.
 #
@@ -123,6 +125,10 @@ def bench_override(config, side):
     value = str(config.get('%s_bench' % (side), '') or '').strip()
     value = value.replace(',', '').replace('_', '').replace(' ', '')
     return None if value.lower() in ['', 'autofill'] else value
+
+def resolves_on_start(config):
+    # Whether the Node looks its branches up when it starts, instead of pinning them when saved
+    return config.get('resolve_on_start') in [True, 'true', 'on', '1', 1]
 
 def network_changed(graph, config, side):
 

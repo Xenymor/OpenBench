@@ -249,6 +249,11 @@
     font-size: 13px;
 }
 
+#content .wf-panel input[type=checkbox] {
+    width: auto;
+    align-self: flex-start;
+}
+
 #content .wf-help {
     color: var(--color-font2);
     white-space: normal;

@@ -245,7 +245,8 @@ def workflow_state(workflow):
             'trigger' : node.trigger,
             'tuned'   : node.tuned,
             'detail'  : node.detail,
-            'ports'   : Graph.outcomes(node.kind), # What the Node can be decided as, by hand
+            'pinned'  : node.pinned or {},
+            'ports'   :Graph.outcomes(node.kind), # What the Node can be decided as, by hand
             'test'    : test_state(node.test) if node.test else None,
             'bench'   : bench_state(node) if node.state == 'STOPPED' and node.test else None,
         }

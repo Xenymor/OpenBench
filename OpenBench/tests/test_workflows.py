@@ -435,20 +435,40 @@ class GraphTests(SimpleTestCase):
         self.assertEqual(merge_options('Threads=1 Hash=8', 'hash=16 A=3'), 'Threads=1 hash=16 A=3')
         self.assertEqual(merge_options('Threads=1 Hash=8', ''), 'Threads=1 Hash=8')
 
+FAKE_BRANCHES = {} # sha -> the branch that fake_commit() resolved to it
+
+def fake_sha(branch):
+    return branch if re.match('^[0-9a-f]{40}$', branch) else hashlib.sha1(branch.encode()).hexdigest()
+
+def fake_commit(errors, engine):
+
+    # Stands in for runner.lookup_commit(), as fake_github() does for collect_github_info()
+    branch = engine['branch']
+
+    if branch == 'missing':
+        errors.append('%s could not be found' % (branch))
+        return None
+
+    sha = fake_sha(branch)
+    FAKE_BRANCHES.setdefault(sha, branch)
+    return sha, 'Commit of %s' % (branch) + ('' if branch == 'nobench' else '\n\nBench: %d' % (1000 + len(branch)))
+
 def fake_github(errors, request, field):
 
     # Stands in for collect_github_info(): every branch exists, its sha is derived
-    # from its name, and its Bench is taken from the form or from the branch name
+    # from its name, and its Bench is taken from the form or from the branch name.
+    # A pinned commit stands for the branch it was pinned from.
     branch = request.POST['%s_branch' % (field)]
+    named  = FAKE_BRANCHES.get(branch, branch)
 
     if branch == 'missing':
         errors.append('%s could not be found' % (branch))
         return
 
-    sha = branch if re.match('^[0-9a-f]{40}$', branch) else hashlib.sha1(branch.encode()).hexdigest()
+    sha = fake_sha(branch)
 
     try: bench = int(request.POST['%s_bench' % (field)])
-    except: bench = None if branch == 'nobench' else 1000 + len(branch)
+    except: bench = None if named == 'nobench' else 1000 + len(named)
 
     if not bench:
         errors.append('Unable to parse a Bench for %s' % (branch))
@@ -458,6 +478,7 @@ def fake_github(errors, request, field):
 
 @mock.patch('OpenBench.workloads.verify_workload.collect_github_info', fake_github)
 @mock.patch('OpenBench.workloads.create_workload.branch_is_out_of_date', lambda workload: False)
+@mock.patch('OpenBench.workflows.runner.lookup_commit', fake_commit)
 class RunnerTests(TestCase):
 
     def setUp(self):
@@ -577,7 +598,7 @@ class RunnerTests(TestCase):
 
     def test_errors_can_be_retried(self):
 
-        graph = { 'defaults' : {}, 'nodes' : { 'a' : node('SPRT', dev='nobench', base='main') }, 'edges' : [] }
+        graph = { 'defaults' : {}, 'nodes' : { 'a' : node('SPRT', dev='nobench', base='main', resolve_on_start=True) }, 'edges' : [] }
         workflow = self.create(graph)
         nodes    = self.nodes(workflow)
 
@@ -769,7 +790,7 @@ class RunnerTests(TestCase):
 
     def test_edit_fixes_errors_and_extends_finished_workflows(self):
 
-        graph    = { 'defaults' : {}, 'nodes' : { 'a' : node('SPRT', dev='nobench', base='main') }, 'edges' : [] }
+        graph    = { 'defaults' : {}, 'nodes' : { 'a' : node('SPRT', dev='nobench', base='main', resolve_on_start=True) }, 'edges' : [] }
         workflow = self.create(graph)
         self.assertEqual(self.nodes(workflow)['a'].state, 'ERROR')
 
@@ -1144,6 +1165,159 @@ class RunnerTests(TestCase):
             runner.use_measured_bench(workflow.id, 'ab', 'Xenymor')
         self.assertTrue(Test.objects.get(id=test.id).finished)
 
+    def counting(self, lookup=fake_commit):
+        calls = []
+        def wrapper(errors, engine):
+            calls.append(engine['branch'])
+            return lookup(errors, engine)
+        return wrapper, calls
+
+    def moved_main(self, errors, engine):
+        # Github, once main has moved on
+        if engine['branch'] != 'main':
+            return fake_commit(errors, engine)
+        FAKE_BRANCHES.setdefault(fake_sha('main-later'), 'main')
+        return fake_sha('main-later'), 'Later commit of main\n\nBench: 2000'
+
+    def test_branches_are_pinned_at_creation(self):
+
+        lookup, calls = self.counting()
+        with mock.patch.object(runner, 'lookup_commit', lookup):
+            workflow = self.create(example_graph())
+        nodes = self.nodes(workflow)
+
+        # Each branch is looked up once, however many Nodes use it. References are not pinned.
+        self.assertEqual(sorted(calls), ['main', 'x', 'y'])
+        self.assertEqual(nodes['ab'].pinned, { 'dev' : fake_sha('x'), 'base' : fake_sha('y') })
+        self.assertEqual(nodes['x_main'].pinned, { 'base' : fake_sha('main') })
+        self.assertEqual(nodes['tune'].pinned, {})
+
+        # main moves on, but the waiting Node tests the commit it was pinned to, named by its branch
+        self.finish_sprt(nodes['ab'].test, passed=True)
+        with mock.patch.object(runner, 'lookup_commit', self.moved_main):
+            x_main = self.nodes(runner.step(workflow.id))['x_main'].test
+
+        self.assertEqual((x_main.base.sha, x_main.base.name, x_main.base.bench), (fake_sha('main'), 'main', 1004))
+        self.assertEqual(x_main.dev.sha, nodes['ab'].test.dev.sha)
+
+        # The page shows the pinned commits
+        self.client.force_login(self.user)
+        state = self.client.get('/workflow/%d/state/' % (workflow.id)).json()['nodes']
+        self.assertEqual(state['x_main']['pinned'], { 'base' : fake_sha('main') })
+
+    def test_pinning_errors_refuse_the_workflow(self):
+
+        def create(**config):
+            graph = { 'defaults' : self.defaults(), 'edges' : [], 'nodes' : { 'a' : node('SPRT', **{ 'base' : 'main', **config }) } }
+            return runner.create_workflow(self.user, 'Pinned', graph)
+
+        count = Workflow.objects.count()
+
+        self.assertEqual(create(dev='missing')[1], ['a: Dev: missing could not be found'])
+        self.assertEqual(create(dev='nobench')[1], ['a: Unable to parse a Dev Bench for nobench'])
+        self.assertEqual(Workflow.objects.count(), count)
+
+        # A given Bench needs none from the commit, and so does a later Node that opts out
+        workflow, errors = create(dev='nobench', dev_bench='555')
+        self.assertIsNone(errors)
+        self.assertEqual(self.nodes(workflow)['a'].test.dev.bench, 555)
+        self.assertEqual(self.nodes(workflow)['a'].test.dev.name, 'nobench')
+
+        workflow, errors = create(dev='missing', resolve_on_start=True)
+        self.assertIsNone(errors)
+        self.assertEqual((self.nodes(workflow)['a'].state, self.nodes(workflow)['a'].pinned), ('ERROR', {}))
+
+        # A Bench that workers confirmed for the commit is enough as well
+        test = self.nodes(create(dev='nobench', dev_bench='555')[0])['a'].test
+        Test.objects.filter(id=test.id).update(games=10)
+        self.assertIsNone(create(dev='nobench')[1])
+
+        # Out of requests: reported once, without asking Github again
+        def limited(errors, engine):
+            errors.append('Github\'s API rate limit was reached while looking up %s, try again later' % (engine['branch']))
+
+        lookup, calls = self.counting(limited)
+        with mock.patch.object(runner, 'lookup_commit', lookup):
+            graph = condition_graph()
+            graph['defaults'] = self.defaults()
+            errors = runner.create_workflow(self.user, 'Limited', graph)[1]
+        self.assertEqual(calls, ['x'])
+        self.assertEqual(errors, ['Github\'s API rate limit was reached while looking up x, try again later'])
+
+        # Settings are checked first, so Github is never asked for a broken Workflow
+        lookup, calls = self.counting()
+        with mock.patch.object(runner, 'lookup_commit', lookup):
+            self.assertTrue(create(dev='x', test_bounds='nonsense')[1])
+        self.assertEqual(calls, [])
+
+    def test_saving_pins_the_waiting_nodes_again(self):
+
+        graph = {
+            'defaults' : {},
+            'nodes' : {
+                'a' : node('SPRT', dev='x', base='main'),
+                'b' : node('SPRT', dev='z', base='main'),
+                'c' : node('SPRT', dev='w', base='main', resolve_on_start=True),
+            },
+            'edges' : [ edge('a', 'passed', 'b'), edge('a', 'passed', 'c') ],
+        }
+
+        workflow = self.create(graph)
+        nodes    = self.nodes(workflow)
+        self.assertEqual(nodes['b'].pinned, { 'dev' : fake_sha('z'), 'base' : fake_sha('main') })
+        self.assertEqual(nodes['c'].pinned, {})
+
+        # Saving again picks up the new commit of main for the waiting Node, not the started one
+        def rename(graph):
+            graph['nodes']['b']['label'] = 'Renamed'
+
+        lookup, calls = self.counting(self.moved_main)
+        with mock.patch.object(runner, 'lookup_commit', lookup):
+            workflow, errors = self.edit(workflow, rename)
+        self.assertIsNone(errors)
+        self.assertEqual(sorted(calls), ['main', 'z'])
+
+        nodes = self.nodes(workflow)
+        self.assertEqual(nodes['a'].pinned, { 'dev' : fake_sha('x'), 'base' : fake_sha('main') })
+        self.assertEqual(nodes['a'].test.base.sha, fake_sha('main'))
+        self.assertEqual(nodes['b'].pinned['base'], fake_sha('main-later'))
+
+        # c looks its branches up once it starts, so it gets the commit main has then
+        self.finish_sprt(nodes['a'].test, passed=True)
+        with mock.patch.object(runner, 'lookup_commit', self.moved_main):
+            nodes = self.nodes(runner.step(workflow.id))
+        self.assertEqual(nodes['b'].test.base.sha, fake_sha('main-later'))
+        self.assertEqual(nodes['b'].test.base.name, 'main')
+        # c was given its branch, which fake_github() resolves itself, as Github would then
+        self.assertEqual((nodes['c'].pinned, nodes['c'].test.base.sha, nodes['c'].test.base.name), ({}, fake_sha('main'), 'main'))
+
+        # A Node that started keeps its settings, so it can no longer opt in or out
+        def pin_c(graph):
+            del graph['nodes']['c']['config']['resolve_on_start']
+        self.assertIn('settings cannot change', self.edit(workflow, pin_c)[1][0])
+
+        # A missing branch of a Node that waits refuses the edit, and changes nothing
+        def add(graph):
+            graph['nodes']['d'] = node('SPRT', dev='missing', base='main')
+            graph['edges'].append(edge('b', 'passed', 'd'))
+        self.assertEqual(self.edit(workflow, add)[1], ['d: Dev: missing could not be found'])
+        self.assertNotIn('d', self.nodes(workflow))
+
+    def test_pinned_shas_and_attached_tests(self):
+
+        # A full sha is pinned to itself, and an attached Test pins nothing
+        sha      = fake_sha('somewhere')
+        workflow = self.create({ 'defaults' : {}, 'edges' : [], 'nodes' : { 'a' : node('SPRT', dev=sha, base='main') } })
+        self.assertEqual(self.nodes(workflow)['a'].pinned['dev'], sha)
+        self.assertEqual(self.nodes(workflow)['a'].test.dev.name, sha)
+
+        test = self.nodes(workflow)['a'].test
+        WorkflowNode.objects.filter(test=test).update(test=None)
+        attached, errors = runner.create_workflow(self.user, 'Attached',
+            { 'defaults' : self.defaults(), 'nodes' : { 'stc' : node('SPRT', existing_test=str(test.id)) }, 'edges' : [] })
+        self.assertIsNone(errors)
+        self.assertEqual(self.nodes(attached)['stc'].pinned, {})
+
     def test_disagreeing_workers_and_other_stops(self):
 
         workflow = self.create(condition_graph())
@@ -1184,7 +1358,7 @@ class RunnerTests(TestCase):
     def test_notifications_for_problems_and_the_end(self):
 
         # A Node that cannot start is announced once, not on every later step
-        graph = { 'defaults' : {}, 'nodes' : { 'a' : node('SPRT', dev='nobench', base='main') }, 'edges' : [] }
+        graph = { 'defaults' : {}, 'nodes' : { 'a' : node('SPRT', dev='nobench', base='main', resolve_on_start=True) }, 'edges' : [] }
         workflow, sent = self.capture_notifications(lambda: self.create(graph))
         self.assertEqual([kind for events in sent for kind, label, text in events], ['attention'])
         self.assertIn('Unable to parse a Bench', sent[0][0][2])

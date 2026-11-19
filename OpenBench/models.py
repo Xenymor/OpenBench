@@ -448,6 +448,7 @@ class WorkflowNode(Model):
     trigger  = CharField(max_length=32, blank=True) # Key of the Node whose edge started this one
     tuned    = CharField(max_length=2048, blank=True) # SPSA values, frozen when the Node finished
     detail   = CharField(max_length=256, blank=True)  # IF, the result its condition was evaluated on
+    pinned   = JSONField(default=dict, blank=True)    # { side : sha } of engines given by a branch, see runner.pin_commits()
     error    = CharField(max_length=1024, blank=True)
     started  = DateTimeField(null=True, blank=True)
     finished = DateTimeField(null=True, blank=True)

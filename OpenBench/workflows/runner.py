@@ -64,7 +64,7 @@ OVERRIDABLE = [
     'spsa_reporting_type', 'spsa_distribution_type',
 ]
 
-# Stand-in for engines that are only resolved once the Node starts
+# Stand-in for the engines while only the settings are checked, see verify_settings()
 PLACEHOLDER = { 'branch' : 'main', 'bench' : '1' }
 
 class WorkflowError(Exception):
@@ -209,6 +209,11 @@ def resolve_engines(workflow, nodes, node):
         if not (ref := Graph.parse_ref(config.get(side))):
             engines[side] = branch_engine(graph, node.key, side)
 
+            # Tested at the commit it was pinned to, but shown by its branch
+            if sha := (node.pinned or {}).get(side):
+                names[side] = engines[side]['branch']
+                engines[side]['branch'] = sha
+
         else:
             engine = referenced_engine(nodes, node, ref)
             names[side]   = engine['name']
@@ -344,6 +349,74 @@ def verify_existing_tests(graph, user, locked={}):
 
     return errors, tests
 
+def pinnable_sides(graph, key):
+
+    # Engines of the Node given by a branch, tag or sha, which are pinned to their commit
+    node   = graph['nodes'][key]
+    config = node.get('config', {})
+
+    if config.get('existing_test') or Graph.resolves_on_start(config):
+        return []
+
+    return [side for side in Graph.ENGINES[node['kind']] if not Graph.parse_ref(config.get(side))]
+
+def lookup_commit(errors, engine):
+
+    # (sha, message) of the branch, tag or sha of an engine, or None after adding an error
+    post = { 'x_engine' : engine['engine'], 'x_repo' : engine['repo'], 'x_branch' : engine['branch'] }
+    if commit := Verify.resolve_commit(errors, post, 'x'):
+        return commit[1], commit[2]
+    return None
+
+def pin_commits(graph, locked={}):
+
+    # ({ key : { side : sha } }, errors) for the Nodes that have not started. Each branch is
+    # looked up once, however many Nodes use it. The Bench that a Node would autofill must be
+    # found as well, so that neither fails only once the Node starts, hours later. At that
+    # point, a Bench that workers have confirmed for the commit in the meantime still wins.
+    # Expects verify_settings() to have passed, so that every engine and repo is known.
+    pins, errors, commits = {}, [], {}
+
+    for key in graph['nodes']:
+
+        if key in locked:
+            continue
+
+        config = graph['nodes'][key].get('config', {})
+        name   = Graph.label(graph, key)
+
+        for side in pinnable_sides(graph, key):
+
+            engine = branch_engine(graph, key, side)
+            where  = (engine['engine'], engine['repo'], engine['branch'])
+
+            if where not in commits:
+                found = []
+                commits[where] = (lookup_commit(found, engine), found)
+
+            commit, found = commits[where]
+
+            if not commit:
+
+                # Every further lookup would fail the same way, so Github is not asked again
+                if any('rate limit' in error for error in found):
+                    return {}, found
+
+                errors += ['%s: %s: %s' % (name, side.title(), error) for error in found]
+                continue
+
+            sha, message = commit
+
+            if (Graph.bench_override(config, side) is None
+                and not Verify.known_bench(engine['engine'], sha, engine['network'])
+                and not Verify.message_bench(message)):
+                errors.append('%s: Unable to parse a %s Bench for %s' % (name, side.title(), engine['branch']))
+                continue
+
+            pins.setdefault(key, {})[side] = sha
+
+    return pins, list(dict.fromkeys(errors))
+
 def create_workflow(user, name, graph):
 
     if not (name := str(name or '').strip()) or len(name) > 128:
@@ -355,6 +428,10 @@ def create_workflow(user, name, graph):
     errors, tests = verify_existing_tests(graph, user)
     errors += verify_settings(graph)
 
+    if errors:
+        return None, errors
+
+    pins, errors = pin_commits(graph)
     if errors:
         return None, errors
 
@@ -370,6 +447,7 @@ def create_workflow(user, name, graph):
                 kind     = node['kind'],
                 state    = State.RUNNING if key in tests else State.WAITING,
                 test_id  = tests.get(key),
+                pinned   = pins.get(key, {}),
                 started  = timezone.now() if key in tests else None,
             )
 
@@ -424,6 +502,19 @@ def update_workflow(workflow_id, user, name, graph):
     if errors := Graph.validate(graph):
         return None, errors
 
+    # Branches are looked up again for every Node that has not started, which is how a
+    # waiting Node picks up new commits. Github may be slow to answer, so that happens
+    # before the lock is taken. A Node that starts in the meantime is locked below, and
+    # keeps the commits it started with.
+    started = { node.key : node.test for node in WorkflowNode.objects.filter(workflow_id=workflow_id).select_related('test') if is_locked(node) }
+
+    if errors := verify_settings(graph, started):
+        return None, errors
+
+    pins, errors = pin_commits(graph, started)
+    if errors:
+        return None, errors
+
     with transaction.atomic():
 
         # Under the same lock as step(), so no Node can start while the edit is applied
@@ -455,6 +546,7 @@ def update_workflow(workflow_id, user, name, graph):
             row = rows.get(key) or WorkflowNode(workflow=workflow, key=key)
             row.kind, row.state, row.outcome, row.trigger, row.error, row.tuned, row.detail = node['kind'], State.WAITING, '', '', '', '', ''
             row.test_id, row.started, row.finished = tests.get(key), None, None
+            row.pinned = pins.get(key, {})
 
             if key in tests:
                 row.state, row.started = State.RUNNING, timezone.now()

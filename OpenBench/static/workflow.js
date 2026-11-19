@@ -87,10 +87,15 @@ const WF_JOIN_HELP =
     'counted, so "all" after two alternative branches means that the one which ran passed.';
 
 const WF_REF_HELP =
-    'Engines are a branch, tag or sha, resolved once the Node starts, or a reference to the exact ' +
-    'engine another Node tested: @trigger.dev, @trigger.base, @trigger.tuned (SPSA values), or ' +
-    '@<key>.dev, @<key>.base, @<key>.tuned. Options of a reference are inherited, and the Options ' +
-    'field only adds overrides.';
+    'Engines are a branch, tag or sha, or a reference to the exact engine another Node tested: ' +
+    '@trigger.dev, @trigger.base, @trigger.tuned (SPSA values), or @<key>.dev, @<key>.base, ' +
+    '@<key>.tuned. Options of a reference are inherited, and the Options field only adds overrides. ' +
+    'Branches are pinned to their commit whenever the Workflow is saved, so saving it again picks up ' +
+    'new commits for the Nodes that have not started.';
+
+const WF_RESOLVE_HELP =
+    'Looks the branches up only once this Node starts, instead of pinning them when the Workflow is ' +
+    'saved. For branches that do not exist yet, or that should include later pushes.';
 
 const WF_PRESET_HELP =
     'Loads a preset of the Dev engine, like STC or LTC, as the buttons of the Test form do. Its ' +
@@ -665,11 +670,45 @@ function wf_render_node_editor(panel, key, node) {
         panel.append(wf_panel_row(label, input));
     }
 
+    if (node.kind == 'SPRT' || node.kind == 'SPSA')
+        wf_resolve_checkbox(panel, key, config);
+
     wf_copy_buttons(panel);
 
     const button = wf_el('button', 'anchorbutton btn-red w-100 mt-1', 'Remove Node');
     button.onclick = () => wf_delete_selection();
     panel.append(button);
+}
+
+function wf_resolves_on_start(config) {
+    // As graph.resolves_on_start(), since pasted Nodes may hold other spellings
+    return [true, 'true', 'on', '1', 1].includes(config.resolve_on_start);
+}
+
+function wf_resolve_checkbox(panel, key, config) {
+
+    // Branches are pinned when the Workflow is saved, unless the Node looks them up once it starts
+    const input = wf_el('input');
+    input.type    = 'checkbox';
+    input.checked = wf_resolves_on_start(config);
+    input.addEventListener('change', () => {
+        if (input.checked) config.resolve_on_start = true;
+        else delete config.resolve_on_start;
+        wf_render();
+    });
+
+    panel.append(wf_panel_row('Resolve on start', input));
+    panel.append(wf_el('p', 'wf-help', WF_RESOLVE_HELP));
+
+    // Editing a running Workflow: the commits it is pinned to now, which saving looks up again
+    const pinned = wf_pinned_text(key);
+    if (pinned)
+        panel.append(wf_el('p', 'wf-help', 'Pinned to ' + pinned + '. Saving looks the branches up again.'));
+}
+
+function wf_pinned_text(key) {
+    const pinned = (wf.state && wf.state.nodes[key] && wf.state.nodes[key].pinned) || {};
+    return Object.entries(pinned).map(([side, sha]) => (side == 'dev' ? 'Dev ' : 'Base ') + String(sha).slice(0, 10)).join(', ');
 }
 
 function wf_presets(kind, engine) {
@@ -851,9 +890,17 @@ function wf_render_node_details(panel, key, node) {
         // Networks as tested, by name, falling back to what the Node asked for
         if (field.endsWith('_network'))
             row(label, (live.test && live.test[field.replace('_network', '_netname')]) || wf_value(config, field));
+
+        // Branches with the commit they were pinned to, which a Node that waits will test
+        else if ((field == 'dev' || field == 'base') && (live.pinned || {})[field])
+            row(label, wf_value(config, field) + ' @ ' + String(live.pinned[field]).slice(0, 10));
+
         else
             row(label, wf_value(config, field));
     }
+
+    if (wf_resolves_on_start(config) && !config.existing_test)
+        row('Branches', 'looked up when the Node starts');
 
     row('Elo', live.test && live.test.elo);
     row('Decided on', live.detail);
