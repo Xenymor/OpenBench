@@ -58,7 +58,7 @@ function create_preset_buttons(engine, workload_type) {
         // Create a new button for the test mode
         var btn       = document.createElement('button')
         btn.innerHTML = mode;
-        btn.onclick   = function() { apply_preset(mode, workload_type); };
+        btn.onclick   = function() { apply_preset(mode, workload_type); autofill_benches(); };
 
         // Apply all of our CSS bootstrapping
         btn.classList.add('anchorbutton');
@@ -236,6 +236,142 @@ function change_engine(engine, target, workload_type) {
     set_option('scale_method', workload_type == 'TUNE' ? 'DEV' : 'BASE');
 
     apply_preset('STC', workload_type);
+    autofill_benches();
+}
+
+// Bench autofill, see views.api_bench(). Lookups only start once the form is used, since a
+// lookup on every page view would spend Github's API requests on the preset's Base Branch.
+var bench_autofill = {
+    active : false,
+    dev    : { filled : null, lookup : 0 }, // The Bench autofill_bench() filled in, and its latest lookup
+    base   : { filled : null, lookup : 0 },
+};
+
+// 'engine|repo|branch' -> { sha, message_bench, time }. For a minute, a branch is not resolved again,
+// e.g. for another Network or a preset. The sha sent along with the Bench guards against a branch that
+// moved on meanwhile, since the server then ignores the Bench filled in for the older commit.
+var bench_commits    = {};
+const BENCH_COMMIT_TTL = 60 * 1000;
+
+function setup_bench_autofill() {
+
+    // Look the Bench up again whenever something it depends on changes. The first change
+    // looks up both sides, since the presets fill in the Base Branch before that.
+    for (const target of ['dev', 'base'])
+        for (const field of ['branch', 'repo', 'network'])
+            document.getElementById(target + '_' + field)?.addEventListener('change', function () {
+                if (bench_autofill.active) return autofill_bench(target);
+                bench_autofill.active = true;
+                autofill_benches();
+            });
+
+    for (const target of ['dev', 'base']) {
+
+        const bench = document.getElementById(target + '_bench');
+        const sha   = document.getElementById(target + '_bench_sha');
+
+        // A Bench typed in by hand is sent as it is, without the sha of an autofilled one
+        bench?.addEventListener('input', function () {
+            if (sha && this.value.trim() != bench_autofill[target].filled) sha.value = '';
+        });
+
+        // Clearing the Bench by hand asks for it to be filled in again
+        bench?.addEventListener('change', function () {
+            if (this.value.trim()) return;
+            this.value = 'Autofill';
+            bench_autofill.active = true;
+            autofill_bench(target);
+        });
+    }
+}
+
+function autofill_benches() {
+
+    if (!bench_autofill.active)
+        return;
+
+    autofill_bench('dev');
+    autofill_bench('base');
+}
+
+function autofill_bench(target) {
+
+    // Fills in the Bench that the server would use for 'Autofill': the one of an earlier
+    // Workload of the same commit and Network, or else the one in the commit message
+    const state  = bench_autofill[target];
+    const bench  = document.getElementById(target + '_bench');
+    const branch = document.getElementById(target + '_branch');
+    const sha    = document.getElementById(target + '_bench_sha');
+
+    if (!bench || !branch)
+        return;
+
+    // Answers to any earlier lookup are stale from here on
+    const lookup = ++state.lookup;
+
+    // Never replace a Bench that was typed in by hand
+    const value = bench.value.trim();
+    if (value && value.toLowerCase() != 'autofill' && value != state.filled)
+        return;
+
+    bench.value  = 'Autofill';
+    bench.title  = '';
+    state.filled = null;
+    if (sha) sha.value = '';
+
+    const name = branch.value.trim();
+    if (!name)
+        return;
+
+    const engine  = document.getElementById(target + '_engine').value;
+    const repo    = document.getElementById(target + '_repo').value.trim();
+    const network = document.getElementById(target + '_network').value;
+    const key     = [engine, repo, name].join('|');
+    const commit  = bench_commits[key];
+    const cached  = commit && Date.now() - commit.time < BENCH_COMMIT_TTL ? commit : null;
+
+    const params = new URLSearchParams({ engine : engine, repo : repo, network : network, branch : name });
+    if (cached) params.set('sha', cached.sha);
+
+    fetch('/api/bench/?' + params.toString(), { credentials : 'same-origin' })
+        .then(response => response.json())
+        .then(data => {
+
+            // A newer lookup was started, or the Bench was typed in meanwhile
+            if (lookup != state.lookup || bench.value.trim().toLowerCase() != 'autofill')
+                return;
+
+            if (data.error || !data.sha) {
+                bench.title = data.error || '';
+                return;
+            }
+
+            if (!cached)
+                bench_commits[key] = { sha : data.sha, message_bench : data.message_bench, time : Date.now() };
+
+            const message_bench = cached ? cached.message_bench : data.message_bench;
+            const short         = data.sha.substring(0, 8);
+
+            if (data.known) {
+                bench.value = String(data.known.bench);
+                bench.title = 'Carried over from ' + data.known.workload.type + ' #' + data.known.workload.id
+                            + ', which ran ' + short + ' with this Network';
+            }
+
+            else if (message_bench) {
+                bench.value = String(message_bench);
+                bench.title = 'From the commit message of ' + short;
+            }
+
+            else {
+                bench.title = 'Unable to parse a Bench for ' + name;
+                return;
+            }
+
+            state.filled = bench.value;
+            if (sha) sha.value = data.sha;
+        })
+        .catch(() => {}); // The server still autofills it when the form is sent
 }
 
 function set_test_type() {

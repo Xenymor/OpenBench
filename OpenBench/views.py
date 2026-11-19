@@ -33,7 +33,7 @@ from OpenBench.workflows import notifications
 from OpenBench.workloads.create_workload import create_workload
 from OpenBench.workloads.get_workload import get_workload
 from OpenBench.workloads.modify_workload import modify_workload
-from OpenBench.workloads.verify_workload import verify_workload
+from OpenBench.workloads.verify_workload import verify_workload, lookup_bench
 from OpenBench.workloads.view_workload import view_workload, fetch_results, fetch_result_summaries
 
 from OpenBench.config import OPENBENCH_CONFIG, OPENBENCH_STATIC_VERSION
@@ -1059,6 +1059,16 @@ def api_build_info(request):
         }
 
     return api_response(data)
+
+def api_bench(request):
+
+    # The Bench that the create forms would autofill for an engine, see create_workload.js.
+    # Only for enabled users, since it may use the credentials of private engines.
+    if not request.user.is_authenticated or not Profile.objects.filter(user=request.user, enabled=True).exists():
+        return api_response({ 'error' : 'Only enabled users can look up Benches' })
+
+    fields = [request.GET.get(field, '') for field in ['engine', 'repo', 'branch', 'network', 'sha']]
+    return api_response(lookup_bench(*fields))
 
 @csrf_exempt
 def api_pgns(request, pgn_id):

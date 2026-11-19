@@ -531,14 +531,18 @@ def binary_matches(binary, test, side):
     suffix  = '-%s' % (engine.sha.upper()[:8]) + ('-%s' % (network[-8:]) if network else '')
     return re.sub(r'\.exe$', '', binary.strip(), flags=re.IGNORECASE).upper().endswith(suffix.upper())
 
-def measured_benches(test, sides):
+def measured_benches(test, sides, summaries=None):
 
     # { side : set of Benches } that workers measured where the Test expected another.
     # Reports of the Bench the Test now expects are stale, from before it was corrected.
-    found  = {}
-    events = LogEvent.objects.filter(test_id=test.id, summary__contains='Wrong Bench').exclude(machine_id=0)
+    # summaries are the Test's 'Wrong Bench' LogEvents, if already fetched with others.
+    found = {}
 
-    for summary in events.values_list('summary', flat=True):
+    if summaries is None:
+        events    = LogEvent.objects.filter(test_id=test.id, summary__contains='Wrong Bench').exclude(machine_id=0)
+        summaries = events.values_list('summary', flat=True)
+
+    for summary in summaries:
         if match := WRONG_BENCH.match(summary.strip()):
             for side in sides:
                 if binary_matches(match['binary'], test, side) and int(match['bench']) != getattr(test, side).bench:

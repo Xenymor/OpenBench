@@ -15,6 +15,7 @@
     <script>
         document.addEventListener(
             'DOMContentLoaded', function () {
+                setup_bench_autofill();
                 change_engine('{{ profile.engine }}', 'dev', '{{workload}}');
                 enforce_default_text('dev_repo', 'https://github.com/');
                 enforce_default_text('base_repo', 'https://github.com/');
@@ -68,6 +69,7 @@
                 </div>
                 <div class="row">
                     <label for="dev_bench" > {{dev_text}} Bench </label> <input value="Autofill" id="dev_bench" name="dev_bench">
+                    <input type="hidden" id="dev_bench_sha" name="dev_bench_sha" value="">
                 </div>
                 <div class="row">
                     <label for="dev_network" > {{dev_text}} Network </label> <select id="dev_network" name="dev_network"></select>
@@ -88,6 +90,7 @@
                     </div>
                     <div class="row">
                         <label for="base_bench"> Base Bench </label> <input value="Autofill" id="base_bench" name="base_bench">
+                        <input type="hidden" id="base_bench_sha" name="base_bench_sha" value="">
                     </div>
                     <div class="row">
                         <label for="base_network"> Base Network </label> <select id="base_network" name="base_network"></select>

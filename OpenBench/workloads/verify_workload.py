@@ -44,6 +44,8 @@ import OpenBench.utils
 
 from OpenBench.models import *
 
+from django.db.models import Q
+
 def verify_workload(request, workload_type):
 
     assert workload_type in [ 'TEST', 'TUNE', 'DATAGEN' ]
@@ -379,15 +381,42 @@ def verify_scale_method(errors, request, field):
         errors.append('Unknown Scale Method. Expected one of {%s}.' % (', '.join(choices)))
 
 
+GITHUB_SHA = re.compile(r'^[0-9a-fA-F]{40}$')
+MAX_BENCH  = 2 ** 31 - 1 # Engine.bench is an IntegerField, 32 bits in MySQL
+
+class GithubRateLimited(Exception):
+    pass
+
 def collect_github_info(errors, request, field):
 
+    if not (commit := resolve_commit(errors, request.POST, field)):
+        return
+
+    base, sha, message = commit
+    branch  = request.POST['{0}_branch'.format(field)].strip()
+    engine  = request.POST['{0}_engine'.format(field)]
+    network = request.POST.get('{0}_network'.format(field), '')
+
+    # Extract the bench from the web form, an earlier Workload, or the commit message
+    if not (bench := determine_bench(errors, request, field, engine, sha, network, message)):
+        return
+
+    info   = request.POST['info'] or strip_message(message)
+    source = OpenBench.utils.path_join(base, 'zipball', sha)
+    return (source, branch, sha, bench, info)
+
+def resolve_commit(errors, post, field):
+
+    # (API base path, commit sha, commit message) for the branch, tag or sha of the field.
+    # post holds '<field>_branch', '<field>_repo' and '<field>_engine', as the web form sends them.
+
     # Get branch name / commit sha / tag, and the API path for it
-    branch = request.POST['{0}_branch'.format(field)]
-    bysha  = bool(re.search('^[0-9a-fA-F]{40}$', branch))
+    branch = post['{0}_branch'.format(field)].strip()
+    bysha  = bool(GITHUB_SHA.match(branch))
 
     # All API requests will share this common path. Some engines are private.
-    base    = request.POST['%s_repo' % (field)].replace('github.com', 'api.github.com/repos')
-    engine  = request.POST['%s_engine' % (field)]
+    base    = post['%s_repo' % (field)].replace('github.com', 'api.github.com/repos')
+    engine  = post['%s_engine' % (field)]
     private = EngineConfig.objects.filter(name=engine).values_list('private', flat=True).first()
     headers = {}
 
@@ -399,7 +428,7 @@ def collect_github_info(errors, request, field):
         return
 
     # Do not allow private engines to use forked repos ( We don't have a token! )
-    if requests_illegal_fork(request, field):
+    if requests_illegal_fork(post, field):
         errors.append('Forked Repositories are not allowed for Private engines')
         return
 
@@ -409,62 +438,192 @@ def collect_github_info(errors, request, field):
         return
 
     ## Step 2: Connect to the Github API for the given Branch or Commit SHA.
-    ## - Parse the most recent commit message for a bench, unless one was supplied.
     ## - We will translate any branch name into a commit SHA for later use
-    ## - Construct the URL to download the source code from Github into a .zip file.
+    ## - The commit message may hold the Bench, see determine_bench()
+    ## - Only the sha and the message are kept, not the rest of Github's answer
 
     try: # Fetch data from the Github API
 
-        # Lookup branch or commit sha, but will fail for tags
-        url  = OpenBench.utils.path_join(base, 'commits' if bysha else 'branches', branch)
-        data = requests.get(url, headers=headers, timeout=30).json()
+        # A full sha: the Git Database API sends the commit alone, without its diff
+        if bysha:
+            data = github_get(OpenBench.utils.path_join(base, 'git', 'commits', branch.lower()), headers)
+            sha, message = data['sha'], data['message']
 
-        # Check to see if the branch name was actually a tag name
-        if not bysha and 'commit' not in data:
-            url  = OpenBench.utils.path_join(base, 'commits', branch)
-            data = requests.get(url, headers=headers, timeout=30).json()
+        else:
 
-        # Actual branches have to go one layer deeper
-        elif not bysha: data = data['commit']
+            # Lookup branch, but will fail for tags and short shas
+            data = github_get(OpenBench.utils.path_join(base, 'branches', branch), headers)
+
+            # Check to see if the branch name was actually a tag name
+            if 'commit' not in data:
+                data = github_get(OpenBench.utils.path_join(base, 'commits', branch), headers)
+
+            # Actual branches have to go one layer deeper
+            else: data = data['commit']
+
+            sha, message = data['sha'], data['commit']['message']
 
         # Check that all the data we need going forward is present
-        assert 'message' in data['commit'] and 'sha' in data
+        assert isinstance(sha, str) and GITHUB_SHA.match(sha) and isinstance(message, str)
+
+    except GithubRateLimited:
+        errors.append('Github\'s API rate limit was reached while looking up %s, try again later' % (branch))
+        return
 
     except: # Unable to find for whatever reason
         traceback.print_exc()
         errors.append('%s could not be found' % (branch or 'Branch'))
         return
 
-    # Extract the bench from the web form, or from the commit message
-    if not (bench := determine_bench(request, field, data['commit']['message'])):
-        errors.append('Unable to parse a Bench for %s' % (branch))
-        return
+    return base, sha.lower(), message
 
-    info   = request.POST['info'] or strip_message(data['commit']['message'])
-    source = OpenBench.utils.path_join(base, 'zipball', data['sha'])
-    return (source, branch, data['sha'], bench, info)
+def github_get(url, headers):
 
-def requests_illegal_fork(request, field):
+    # The JSON of a Github API request. Running out of requests is told apart from a missing
+    # branch, since Github answers both with an error, and retrying later fixes only one of them.
+    response = requests.get(url, headers=headers, timeout=30)
+
+    if response.status_code in [403, 429] and (response.headers.get('x-ratelimit-remaining') == '0'
+                                                or 'rate limit' in response.text.lower()):
+        raise GithubRateLimited()
+
+    return response.json()
+
+def requests_illegal_fork(post, field):
 
     # Strip trailing '/'s for sanity
-    config  = EngineConfig.objects.filter(name=request.POST['%s_engine' % (field)]).first()
+    config  = EngineConfig.objects.filter(name=post['%s_engine' % (field)]).first()
     eng_src = config.source.rstrip('/')
-    tar_src = request.POST['%s_repo' % (field)].rstrip('/')
+    tar_src = post['%s_repo' % (field)].rstrip('/')
 
     # Illegal if sources do not match for Private engines
     return config.private and eng_src != tar_src
 
-def determine_bench(request, field, message):
+def parse_bench(value):
 
-    # Use the provided bench if possible
-    try: return int(request.POST['{0}_bench'.format(field)])
-    except: pass
+    # None to autofill the Bench, otherwise the Bench, or 0 if it is not a positive number.
+    # Thousands separators are dropped, as when a Bench is read from a commit message.
+    value = re.sub(r'[,_\s]', '', str(value or ''))
+
+    if value.lower() in ['', 'autofill']:
+        return None
+
+    return int(value) if re.fullmatch('[0-9]{1,10}', value) and 0 < int(value) <= MAX_BENCH else 0
+
+def determine_bench(errors, request, field, engine, sha, network, message):
+
+    # The Bench for the resolved commit, or None after adding an error
+    branch = request.POST['{0}_branch'.format(field)].strip()
+    given  = parse_bench(request.POST.get('{0}_bench'.format(field), ''))
+
+    if given == 0:
+        errors.append('%s Bench must be a positive number, or Autofill' % (field.title()))
+        return None
+
+    # create_workload.js names the commit it filled the Bench in for. If the branch has moved on
+    # since, that Bench belongs to the older commit, so this one is autofilled instead.
+    filled_for = request.POST.get('{0}_bench_sha'.format(field), '').strip().lower()
+
+    if given and (not filled_for or filled_for == sha):
+        return given
+
+    # Carry it over from an earlier Workload of the same commit and Network. That one is
+    # right even where the Bench in the commit message was measured with another Network.
+    if (known := known_bench(engine, sha, network)):
+        return known[0]
+
+    if (bench := message_bench(message)):
+        return bench
+
+    errors.append('Unable to parse a Bench for %s' % (branch))
+    return None
+
+def message_bench(message):
 
     # Fallback to try to parse the Bench from the commit
     try:
         benches = re.findall('(?:BENCH|NODES)[ :=]+([0-9,]+)', message, re.IGNORECASE)
-        return int(benches[-1].replace(',', ''))
+        bench   = int(benches[-1].replace(',', ''))
+        return bench if 0 < bench <= MAX_BENCH else None
     except: return None
+
+def known_bench(engine, sha, network):
+
+    # (Bench, Workload) of the latest Workload that ran this commit of the engine with this
+    # Network, or None. Only Benches that workers confirmed count: they played games with it,
+    # and none of them measured another one (a REBENCH would have taken the measured one).
+    network = network or ''
+
+    # Engines are found by their indexed sha, and Workloads by their indexed Engines. One query
+    # per side, since an OR across both would keep the database from using either index.
+    engines = set(Engine.objects.filter(sha=sha).order_by('-id').values_list('id', flat=True)[:512])
+    if not engines:
+        return None
+
+    fields     = ['id', 'test_mode', 'dev_id', 'base_id', 'dev_engine', 'base_engine', 'dev_network',
+                  'base_network', 'dev__sha', 'dev__bench', 'base__sha', 'base__bench']
+    candidates = {}
+
+    for side in ['dev', 'base']:
+        query = Test.objects.filter(deleted=False, games__gt=0, **{
+            '%s_id__in' % (side) : engines, '%s_engine' % (side) : engine, '%s_network' % (side) : network })
+        for workload in query.select_related('dev', 'base').only(*fields).order_by('-id')[:16]:
+            candidates[workload.id] = workload
+
+    workloads = sorted(candidates.values(), key=lambda workload: -workload.id)[:16]
+
+    # The reports of wrong Benches for all of them at once, see utils.measured_benches()
+    summaries = {}
+    events    = LogEvent.objects.filter(test_id__in=candidates.keys(), summary__contains='Wrong Bench').exclude(machine_id=0)
+    for test_id, summary in events.values_list('test_id', 'summary'):
+        summaries.setdefault(test_id, []).append(summary)
+
+    for workload in workloads:
+        for side in OpenBench.utils.workload_sides(workload):
+
+            if (getattr(workload, '%s_id' % (side)) not in engines
+                or getattr(workload, '%s_engine'  % (side)) != engine
+                or getattr(workload, '%s_network' % (side)) != network):
+                continue
+
+            if side not in OpenBench.utils.measured_benches(workload, [side], summaries.get(workload.id, [])):
+                return getattr(workload, side).bench, workload
+
+    return None
+
+def lookup_bench(engine, repo, branch, network, sha=''):
+
+    # What a Workload with these settings would autofill, for create_workload.js: { 'sha', 'known',
+    # 'message_bench' } or { 'error' }. 'known' is the Bench of an earlier Workload, as known_bench()
+    # finds it, and wins over the Bench in the commit message. Given the sha that an earlier lookup
+    # resolved the branch to, only 'known' is looked up again, without asking Github.
+    branch, network, sha = branch.strip(), network.strip(), sha.strip().lower()
+
+    if not EngineConfig.objects.filter(name=engine, enabled=True).exists():
+        return { 'error' : 'Unknown Engine' }
+
+    if not re.match(r'^https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+\/?$', repo):
+        return { 'error' : 'Sources must be found on https://github.com/<User>/<Repo>' }
+
+    def known_dict(sha):
+        if not (known := known_bench(engine, sha, network)):
+            return None
+        return { 'bench' : known[0], 'workload' : { 'id' : known[1].id, 'type' : known[1].workload_type_str() } }
+
+    if sha:
+        if not GITHUB_SHA.match(sha):
+            return { 'error' : 'Malformed sha' }
+        return { 'sha' : sha, 'known' : known_dict(sha) }
+
+    if not branch:
+        return { 'error' : 'No Branch given' }
+
+    errors = []
+    if not (commit := resolve_commit(errors, { 'x_engine' : engine, 'x_repo' : repo, 'x_branch' : branch }, 'x')):
+        return { 'error' : errors[0] }
+
+    _, sha, message = commit
+    return { 'sha' : sha, 'known' : known_dict(sha), 'message_bench' : message_bench(message) }
 
 def strip_message(message):
     lines = message.strip().split("\n")
