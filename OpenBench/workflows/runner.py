@@ -44,14 +44,17 @@ import OpenBench.spsa_utils
 import OpenBench.stats
 import OpenBench.views # Before the workload modules, which only import cleanly once it is loaded
 
+from OpenBench.github import GithubError
 from OpenBench.models import LogEvent, Profile, Test, Workflow, WorkflowNode
 from OpenBench.utils import measured_benches
+from OpenBench.workflows import actions
 from OpenBench.workflows import conditions
 from OpenBench.workflows import graph as Graph
 from OpenBench.workflows import notifications
 from OpenBench.workflows.options import merge_options, is_option_string, estimate_tuned_options
 from OpenBench.workloads import create_workload as Create
 from OpenBench.workloads import verify_workload as Verify
+from OpenBench.workloads.checks import same_bench
 from OpenBench.workloads.modify_workload import apply_measured_bench, WorkloadActionError
 
 State  = WorkflowNode.State
@@ -61,7 +64,7 @@ Status = Workflow.Status
 OVERRIDABLE = [
     'test_bounds', 'test_confidence', 'priority', 'throughput',
     'spsa_alpha', 'spsa_gamma', 'spsa_A_ratio', 'spsa_iterations', 'spsa_pairs_per',
-    'spsa_reporting_type', 'spsa_distribution_type',
+    'spsa_reporting_type', 'spsa_distribution_type', 'spsa_auto_stop',
 ]
 
 # Stand-in for the engines while only the settings are checked, see verify_settings()
@@ -592,7 +595,7 @@ def observe(workflow, node):
     elif node.kind == 'SPRT' and (test.passed or test.failed):
         finish(node, 'passed' if test.passed else 'failed')
 
-    elif node.kind == 'SPSA' and test.games >= spsa_games_needed(workflow, node):
+    elif node.kind == 'SPSA' and (test.games >= spsa_games_needed(workflow, node) or converged(test)):
         node.tuned = OpenBench.spsa_utils.spsa_tuned_options(test)
         finish(node, 'done')
 
@@ -608,11 +611,19 @@ def observe(workflow, node):
 
 def stop_reason(test):
 
+    # The Server stops a Test with too many errors, see OpenBench/error_watch.py
+    if test.stop_reason:
+        return test.stop_reason[:1024]
+
     # Workers stop a Test whose engine does not build or bench correctly, and log why
     event = LogEvent.objects.filter(test_id=test.id).exclude(machine_id=0).order_by('-id').first()
     if event and 'Bench' in event.summary:
         return ('Stopped by a worker: %s' % (event.summary))[:1024]
     return 'The Test was stopped'
+
+def converged(test):
+    # A tune that stopped itself, since its values no longer moved, see OpenBench/spsa_history.py
+    return test.finished and test.spsa_run.converged_at is not None
 
 def spsa_games_needed(workflow, node):
     config  = workflow.graph['nodes'][node.key].get('config', {})
@@ -683,6 +694,25 @@ def decide_condition(workflow, nodes, node):
     node.started = timezone.now()
     node.save()
 
+def perform_action(workflow, nodes, node):
+
+    # MERGE and COMMIT act on Github right away, see actions.py. A failure is kept as
+    # an ERROR, to be retried, or decided by hand.
+    try:
+        node.detail = actions.perform(workflow, nodes, node)[:256]
+        node.error  = ''
+        finish(node, 'done')
+
+    except (actions.ActionError, WorkflowError, GithubError) as error:
+        node.state, node.error = State.ERROR, str(error)[:1024]
+
+    except Exception as error:
+        traceback.print_exc()
+        node.state, node.error = State.ERROR, ('Unexpected error: %s' % (error))[:1024]
+
+    node.started = timezone.now()
+    node.save()
+
 def create_test(workflow, nodes, node):
 
     engines, names   = resolve_engines(workflow, nodes, node)
@@ -696,6 +726,13 @@ def create_test(workflow, nodes, node):
 
     if node.kind == 'SPRT':
         test, errors = Create.create_new_test(request)
+
+        # A Dev with the Bench of its Base is likely no functional change, which only has to
+        # show that it loses nothing, see OpenBench/workloads/checks.py
+        config = workflow.graph['nodes'][node.key].get('config', {})
+        if test and (bounds := str(config.get('same_bench_bounds', '') or '').strip()) and same_bench(test):
+            Create.apply_sprt_bounds(test, bounds)
+            test.info = ('[Same Bench, so bounds %s] %s' % (bounds, test.info))[:1024]
 
     if node.kind == 'SPSA':
         test, errors = Create.create_new_tune(request)
@@ -766,6 +803,9 @@ def step(workflow_id):
                     if node.kind == 'IF':
                         decide_condition(workflow, nodes, node)
                         decided = decided or node.state == State.FINISHED
+                    elif node.kind in Graph.ACTIONS:
+                        perform_action(workflow, nodes, node)
+                        decided = decided or node.state == State.FINISHED
                     else:
                         start(workflow, nodes, node)
 
@@ -796,6 +836,9 @@ def result_text(node):
     if node.kind == 'SPSA' and node.tuned:
         return '%s, %s' % (node.outcome, node.tuned[:300])
 
+    if node.kind in Graph.ACTIONS and node.detail:
+        return '%s, %s' % (node.outcome or node.state.lower(), node.detail)
+
     return node.outcome or node.state.lower()
 
 def collect_events(workflow, nodes, states, status):
@@ -816,7 +859,7 @@ def collect_events(workflow, nodes, states, status):
         if changed and node.state in [State.STOPPED, State.ERROR]:
             events.append(('attention', label, node.error or node.state.lower()))
 
-        if changed and level == 'all' and node.state == State.FINISHED and node.kind in ['SPRT', 'SPSA']:
+        if changed and level == 'all' and node.state == State.FINISHED and node.kind in ['SPRT', 'SPSA'] + Graph.ACTIONS:
             events.append((node.outcome, label, result_text(node)))
 
     if workflow.status == Status.FINISHED and status != Status.FINISHED:

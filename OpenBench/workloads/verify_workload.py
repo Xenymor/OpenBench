@@ -167,6 +167,7 @@ def verify_tune_creation(errors, request):
         (verify_greater_than          , 'spsa_gamma', 'SPSA Gamma', 0.00),
         (verify_greater_than          , 'spsa_iterations', 'SPSA Iterations', 0),
         (verify_greater_than          , 'spsa_pairs_per', 'SPSA Pairs-Per', 0),
+        (verify_auto_stop             , 'spsa_auto_stop'),
     ]
 
     for verification in verifications:
@@ -341,6 +342,11 @@ def verify_spsa_inputs(errors, request, field):
     except:
         traceback.print_exc()
         errors.append('Malformed SPSA Input')
+
+def verify_auto_stop(errors, request, field):
+    # Optional, since older forms and Workflows do not send it. 0 never stops early
+    try: assert 0.0 <= float(request.POST.get(field) or 0.0) <= 100.0
+    except: errors.append('SPSA Auto-Stop must be a number within [0, 100], or 0 to disable it')
 
 def verify_spsa_reporting_type(errors, request, field, field_name):
     candidates = ['BULK', 'BATCHED']

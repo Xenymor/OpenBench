@@ -126,7 +126,7 @@ def test_result(test):
 def build_test_messages(test, kind, text, site=''):
 
     # kind is 'passed', 'failed' or 'done' for a result, or 'attention' for a stopped Test
-    url   = '%s/test/%d/' % (site, test.id) if site else ''
+    url   = '%s/%s/%d/' % (site, test.workload_type_str(), test.id) if site else ''
     words = { 'attention' : 'needs attention', 'passed' : 'passed', 'failed' : 'failed', 'done' : 'finished' }
     name  = '#%d %s vs %s (%s)' % (test.id, test.dev.name, test.base.name, test.dev_time_control)
     return [message(embed(kind, '%s %s' % (name, words[kind]), [text], url))]
@@ -202,9 +202,42 @@ def test_finished(test):
 @quietly
 def test_stopped(test, reason):
 
-    # Called when a worker stops a Test, for example since its Bench is wrong
-    if test.test_mode not in ['SPRT', 'GAMES'] or test_level(test.notify) == 'off':
+    # Called when a worker stops a Test, for example since its Bench is wrong, or when the Server
+    # stops it for too many errors. Tests of a Workflow are announced by their Workflow instead.
+    if test.test_mode not in ['SPRT', 'GAMES', 'SPSA'] or test_level(test.notify) == 'off':
         return
 
-    text = ('Stopped by a worker: %s' % (reason))[:1024]
-    send(lambda site: build_test_messages(test, 'attention', text, site))
+    text = reason if reason.startswith('Stopped by') else 'Stopped by a worker: %s' % (reason)
+    send(lambda site: build_test_messages(test, 'attention', text[:1024], site))
+
+def owning_level(test):
+
+    # The level that applies to a Test: its Workflow's, if it belongs to one, otherwise its own
+    from OpenBench.models import WorkflowNode
+    node = WorkflowNode.objects.select_related('workflow').filter(test_id=test.id).first()
+    return level(node.workflow.graph) if node else test_level(test.notify)
+
+@quietly
+def test_error(test, text):
+
+    # The first crash or illegal move of a Test, which is worth a look before it stops.
+    # Workflows only announce stopped Tests, so their Tests are announced here as well.
+    if owning_level(test) != 'off':
+        send(lambda site: build_test_messages(test, 'attention', text[:1024], site))
+
+@quietly
+def tune_converged(test):
+
+    if test_level(test.notify) != 'all':
+        return
+
+    run  = test.spsa_run
+    text = 'Converged after %d of %d games, the values moved by less than %.2f C_end' % (
+        test.games, 2 * run.pairs_per * run.iterations, run.auto_stop)
+    send(lambda site: build_test_messages(test, 'done', text, site))
+
+@quietly
+def announce(kind, title, lines, path=''):
+
+    # Messages of the push triggers and the Ladders, see OpenBench/automation.py and OpenBench/ladder.py
+    send(lambda site: [message(embed(kind, title, lines, (site + path) if site and path else ''))])

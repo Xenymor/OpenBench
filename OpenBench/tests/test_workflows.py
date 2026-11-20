@@ -226,9 +226,9 @@ class NotificationTests(SimpleTestCase):
         self.assertEqual(sent[0]['title'][-15:], 'needs attention')
         self.assertEqual(sent[0]['description'], 'Stopped by a worker: [Fispur-ABCD] Wrong Bench: 123')
 
-        # What each level announces. Tunes, Datagen, and Tests from before announce nothing
+        # What each level announces. Tunes only when stopped, Datagen and Tests from before never
         for notify, mode, expected in [('all', 'SPRT', 2), ('attention', 'SPRT', 1), ('off', 'SPRT', 0),
-                                       ('', 'SPRT', 0), ('bogus', 'SPRT', 0), ('all', 'SPSA', 0), ('all', 'DATAGEN', 0)]:
+                                       ('', 'SPRT', 0), ('bogus', 'SPRT', 0), ('all', 'SPSA', 1), ('all', 'DATAGEN', 0)]:
             test = self.single_test(test_mode=mode, passed=True)
             test.notify = notify
             sent = self.sent_for_tests(lambda: (notifications.test_finished(test), notifications.test_stopped(test, 'x')))
@@ -477,7 +477,7 @@ def fake_github(errors, request, field):
     return ('https://api.github.com/repos/x/y/zipball/' + sha, branch, sha, bench, 'Commit of ' + branch)
 
 @mock.patch('OpenBench.workloads.verify_workload.collect_github_info', fake_github)
-@mock.patch('OpenBench.workloads.create_workload.branch_is_out_of_date', lambda workload: False)
+@mock.patch('OpenBench.workloads.create_workload.run_checks', lambda workload: {})
 @mock.patch('OpenBench.workflows.runner.lookup_commit', fake_commit)
 class RunnerTests(TestCase):
 

@@ -160,6 +160,7 @@ def verify_engine_tune_preset(tune_preset):
         'spsa_A_ratio',
         'spsa_iterations',
         'spsa_pairs_per',
+        'spsa_auto_stop',
 
         'book_name',
         'upload_pgns',

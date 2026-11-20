@@ -36,6 +36,13 @@
 # So after 'x vs main' or 'y vs main', of which only one runs, 'all' means that
 # the one which ran has passed.
 #
+# MERGE and COMMIT are actions on Github, which run once a Node before them fired, and
+# fire 'done' once they succeeded, see actions.py. A MERGE brings an engine that a Node
+# tested (its 'source', '@trigger.dev' by default) into a branch: as a pull request, as a
+# merge commit, or as a fast-forward. A COMMIT writes the values that an SPSA tuned into
+# a file of the engine, with a pattern that finds each value by its name, and may open a
+# pull request for that as well. A failed action is an ERROR, which can be retried.
+#
 # An SPRT also fires 'done' alongside 'passed' or 'failed', so that an IF Node
 # can look at its whole result. An IF evaluates a condition like 'failed && elo > 3'
 # (see conditions.py) on the SPRT that started it, or on the one named in its
@@ -61,7 +68,20 @@ PORTS = {
     'SPSA' : ['done'],
     'JOIN' : ['all', 'some', 'none'],
     'IF'   : ['true', 'false'],
+    'MERGE'  : ['done'],
+    'COMMIT' : ['done'],
 }
+
+# Nodes that act on Github instead of running a Test, see actions.py
+ACTIONS      = ['MERGE', 'COMMIT']
+MERGE_MODES  = ['pr', 'merge', 'ff']
+COMMIT_MODES = ['pr', 'commit']
+
+# Finds the value of a parameter in a source file. {name} is replaced by the parameter's
+# name, and the first group is the value that is replaced.
+DEFAULT_PATTERN = r'\b{name}\b\s*=\s*(-?\d+(?:\.\d+)?)'
+BOUNDS_PATTERN  = re.compile(r'^\[(-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)\]$') # As FLOAT_PAIR_PATTERN of the workload forms
+FILE_PATTERN    = re.compile(r'^(?!/)(?!.*\.\.)[A-Za-z0-9_./ -]{1,256}$')
 
 # Ports that fire with every outcome of a kind, in addition to the outcome itself
 ALWAYS = { 'SPRT' : ['done'] }
@@ -71,8 +91,8 @@ def outcomes(kind):
     return [port for port in PORTS[kind] if port not in ALWAYS.get(kind, [])]
 
 # Engine fields of each kind, and which reference targets each kind provides
-ENGINES    = { 'SPRT' : ['dev', 'base'], 'SPSA' : ['dev'], 'JOIN' : [], 'IF' : [] }
-REF_FIELDS = { 'SPRT' : ['dev', 'base'], 'SPSA' : ['dev', 'tuned'], 'JOIN' : [], 'IF' : [] }
+ENGINES    = { 'SPRT' : ['dev', 'base'], 'SPSA' : ['dev'], 'JOIN' : [], 'IF' : [], 'MERGE' : [], 'COMMIT' : [] }
+REF_FIELDS = { 'SPRT' : ['dev', 'base'], 'SPSA' : ['dev', 'tuned'], 'JOIN' : [], 'IF' : [], 'MERGE' : [], 'COMMIT' : [] }
 
 KEY_PATTERN    = re.compile(r'^[A-Za-z0-9_-]{1,32}$')
 REF_PATTERN    = re.compile(r'^@([A-Za-z0-9_-]{1,32})\.(dev|base|tuned)$')
@@ -301,9 +321,18 @@ def validate_node(graph, key, node):
     if node['kind'] == 'IF':
         return validate_condition(graph, key, node)
 
+    if node['kind'] in ACTIONS:
+        return validate_action(graph, key, node)
+
     if node['kind'] == 'SPSA':
         try: assert 0.0 < float(config.get('at_percent', 100)) <= 100.0
         except: errors.append('%s: "Done at %%" must be within (0, 100]' % (name))
+
+    # Bounds for a Dev with the same Bench as its Base, see runner.create_test()
+    if node['kind'] == 'SPRT' and (bounds := str(config.get('same_bench_bounds', '') or '').strip()):
+        match = BOUNDS_PATTERN.match(bounds)
+        if not match or float(match.group(1)) >= float(match.group(2)):
+            errors.append('%s: Same Bench Bounds must be formatted as [float1, float2]' % (name))
 
     errors += validate_preset(name, config)
 
@@ -336,29 +365,104 @@ def validate_node(graph, key, node):
                 errors.append('%s: %s must be a branch, tag, sha, or a reference like @trigger.dev' % (name, field.title()))
             continue
 
-        target, target_field = ref
+        errors += validate_ref(graph, key, ref)
 
-        if target == 'trigger':
+    return errors
 
-            kinds = trigger_kinds(graph, key)
+def validate_ref(graph, key, ref):
 
-            if not parents:
-                errors.append('%s: @trigger needs an incoming edge' % (name))
+    # A reference '@target.field' of the Node key, which must be known once the Node starts
+    name, parents = label(graph, key), incoming(graph, key)
+    target, target_field = ref
 
-            elif 'JOIN' in kinds:
-                errors.append('%s: @trigger is ambiguous after a JOIN, refer to a Node by its key' % (name))
+    if target == 'trigger':
 
-            elif any(target_field not in REF_FIELDS[kind] for kind in kinds):
-                errors.append('%s: Not every incoming Node provides @trigger.%s' % (name, target_field))
+        kinds = trigger_kinds(graph, key)
 
-        elif target not in graph['nodes']:
-            errors.append('%s: Unknown Node "%s"' % (name, target))
+        if not parents:
+            return ['%s: @trigger needs an incoming edge' % (name)]
 
-        elif target_field not in REF_FIELDS[graph['nodes'][target]['kind']]:
-            errors.append('%s: %s provides no "%s"' % (name, label(graph, target), target_field))
+        if 'JOIN' in kinds:
+            return ['%s: @trigger is ambiguous after a JOIN, refer to a Node by its key' % (name)]
 
-        elif not dominates(graph, target, key):
-            errors.append('%s: %s must have finished on every path that leads here' % (name, label(graph, target)))
+        if any(target_field not in REF_FIELDS[kind] for kind in kinds):
+            return ['%s: Not every incoming Node provides @trigger.%s' % (name, target_field)]
+
+    elif target not in graph['nodes']:
+        return ['%s: Unknown Node "%s"' % (name, target)]
+
+    elif target_field not in REF_FIELDS[graph['nodes'][target]['kind']]:
+        return ['%s: %s provides no "%s"' % (name, label(graph, target), target_field)]
+
+    elif not dominates(graph, target, key):
+        return ['%s: %s must have finished on every path that leads here' % (name, label(graph, target))]
+
+    return []
+
+def validate_pattern(pattern):
+
+    # Whether a COMMIT's pattern finds a value by a name: it needs {name}, and a group for the value
+    if '{name}' not in pattern or len(pattern) > 256:
+        return False
+
+    try: return re.compile(pattern.replace('{name}', 'Name')).groups >= 1
+    except re.error: return False
+
+def validate_action(graph, key, node):
+
+    errors = []
+    name   = label(graph, key)
+    config = node.get('config', {})
+    target = str(config.get('target', '') or 'main').strip()
+    mode   = str(config.get('mode', '') or 'pr').strip()
+
+    if not incoming(graph, key):
+        errors.append('%s must have an incoming edge' % (name))
+
+    if not BRANCH_PATTERN.match(target):
+        errors.append('%s: Target must be a branch' % (name))
+
+    if node['kind'] == 'MERGE':
+
+        if mode not in MERGE_MODES:
+            errors.append('%s: Mode must be one of %s' % (name, ', '.join(MERGE_MODES)))
+
+        # The engine to merge: a reference to a tested one, or a branch
+        source = str(config.get('source', '') or '@trigger.dev').strip()
+
+        if ref := parse_ref(source):
+            if ref[1] == 'tuned':
+                errors.append('%s: Tuned values are options, not commits, so use a COMMIT Node for them' % (name))
+            elif incoming(graph, key):
+                errors += validate_ref(graph, key, ref)
+
+        elif not BRANCH_PATTERN.match(source):
+            errors.append('%s: Source must be a branch, or a reference like @trigger.dev' % (name))
+
+    if node['kind'] == 'COMMIT':
+
+        if mode not in COMMIT_MODES:
+            errors.append('%s: Mode must be one of %s' % (name, ', '.join(COMMIT_MODES)))
+
+        source = str(config.get('source', '') or '').strip()
+
+        if source:
+            if source not in graph['nodes'] or graph['nodes'][source]['kind'] != 'SPSA':
+                errors.append('%s: Source must be the key of an SPSA' % (name))
+            elif not dominates(graph, source, key):
+                errors.append('%s: %s must have finished on every path that leads here' % (name, label(graph, source)))
+
+        elif incoming(graph, key) and trigger_kinds(graph, key) != { 'SPSA' }:
+            errors.append('%s: Without a Source, every incoming edge must come from an SPSA' % (name))
+
+        if not FILE_PATTERN.match(str(config.get('file', '') or '').strip()):
+            errors.append('%s: File must be a path within the repository, like src/Search.cs' % (name))
+
+        if not validate_pattern(str(config.get('pattern', '') or DEFAULT_PATTERN)):
+            errors.append('%s: Pattern must contain {name}, and a group that captures the value' % (name))
+
+        if (branch := str(config.get('branch', '') or '').strip()) and not BRANCH_PATTERN.match(branch):
+            errors.append('%s: Branch must be a branch name' % (name))
 
     return errors
 

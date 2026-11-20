@@ -198,6 +198,18 @@
                     <div class="row">
                         <label for="spsa_pairs_per"> Pairs-Per </label> <input value="8" id="spsa_pairs_per" name="spsa_pairs_per">
                     </div>
+                    <div class="row" title="Stops the tune once no parameter moved by more than this many C_end over the last 20% of the planned games, after at least 30% of them. 0 never stops early.">
+                        <label for="spsa_auto_stop"> Auto-Stop </label> <input value="0" id="spsa_auto_stop" name="spsa_auto_stop">
+                    </div>
+
+                    <div class="row">
+                        <label for="notify"> Discord </label>
+                        <select id="notify" name="notify">
+                            <option selected value="all"> Result and problems </option>
+                            <option value="attention"> Only problems </option>
+                            <option value="off"> Off </option>
+                        </select>
+                    </div>
 
                 {% elif workload == "DATAGEN" %}
 

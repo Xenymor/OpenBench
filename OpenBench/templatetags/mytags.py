@@ -23,6 +23,7 @@ import django.utils.timezone
 import re
 
 import OpenBench.config
+import OpenBench.eta
 import OpenBench.models
 import OpenBench.spsa_utils
 import OpenBench.stats
@@ -89,8 +90,15 @@ def shortStatBlock(test):
         elo_line = 'Elo: %0.2f +- %0.2f (95%%) [N=%d]' % (elo, max(upper - elo, elo - lower), test.max_games)
         statlines = [status_line, elo_line, penta_line] if test.use_penta else [status_line, elo_line, tri_line]
 
-    gpm = test.games_per_minute(django.utils.timezone.now())
-    statlines.append('Speed: %s' % ('-' if gpm is None else '%0.1f games/min' % (gpm)))
+    now = django.utils.timezone.now()
+    gpm = test.games_per_minute(now)
+    speed = 'Speed: %s' % ('-' if gpm is None else '%0.1f games/min' % (gpm))
+
+    # How long it still runs at that speed, see OpenBench/eta.py
+    if not test.finished and gpm:
+        speed += ' ETA: %s' % (OpenBench.eta.describe(OpenBench.eta.remaining_seconds(test, now)))
+
+    statlines.append(speed)
 
     return '\n'.join(statlines)
 

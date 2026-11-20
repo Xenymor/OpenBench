@@ -44,6 +44,8 @@ from OpenBench.models import *
 from OpenBench.stats import TrinomialSPRT, PentanomialSPRT
 from OpenBench.workflows import notifications
 
+import OpenBench.error_watch
+import OpenBench.spsa_history
 import OpenBench.views
 import OpenBench.model_utils
 
@@ -646,11 +648,26 @@ def update_test(request, machine):
             # Finished, and always passing, for a completed DATAGEN Workload
             test.passed = test.finished = test.games >= test.max_games
 
+        # SPSA history, and tunes that stopped moving, see OpenBench/spsa_history.py
+        converged = test.test_mode == 'SPSA' and OpenBench.spsa_history.record(test, parameters)
+
+        # Crashes, time losses and illegal moves, which may stop the Test, see OpenBench/error_watch.py
+        alert, stop = OpenBench.error_watch.record_errors(test, crashes, timelosses, illegals)
+
         test.save()
 
         # Only the report that finished the Test gets here with it finished, so it is announced once
-        if test.finished:
+        if stop:
+            transaction.on_commit(lambda: notifications.test_stopped(test, stop))
+
+        elif converged:
+            transaction.on_commit(lambda: notifications.tune_converged(test))
+
+        elif test.finished:
             transaction.on_commit(lambda: notifications.test_finished(test))
+
+        if alert:
+            transaction.on_commit(lambda: notifications.test_error(test, alert))
 
         # Update Result object; No risk from concurrent access
         Result.objects.filter(id=result_id).update(

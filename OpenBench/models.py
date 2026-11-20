@@ -23,7 +23,7 @@ import json
 import math
 
 from django.db.models import CharField, IntegerField, BigIntegerField, BooleanField, FloatField
-from django.db.models import JSONField, ForeignKey, DateTimeField, OneToOneField
+from django.db.models import JSONField, ForeignKey, DateTimeField, OneToOneField, TextField
 from django.db.models import CASCADE, PROTECT, SET_NULL, Model, TextChoices
 from django.contrib.auth.models import User
 
@@ -281,6 +281,21 @@ class Test(Model):
     RATE_WINDOW     = 3600 # Time constant of the decay, in seconds
     RATE_MIN_WINDOW = 300  # Observed seconds required before reporting a rate
 
+    # Errors that workers reported while playing, see OpenBench/error_watch.py. The baseline
+    # holds the counts at the last restart, so that the limits apply to what happened since.
+    crashes        = IntegerField(default=0)
+    timelosses     = IntegerField(default=0)
+    illegals       = IntegerField(default=0)
+    error_baseline = JSONField(default=dict, blank=True)
+    stop_reason    = CharField(max_length=256, default='', blank=True) # Why the Server stopped it
+
+    # Warnings found when the Workload was created, see OpenBench/workloads/checks.py
+    checks = JSONField(default=dict, blank=True)
+
+    # Experiment journal: space separated tags, and free notes
+    tags  = CharField(max_length=256, default='', blank=True)
+    notes = TextField(default='', blank=True)
+
     def __str__(self):
         return '{0} vs {1} @ {2}'.format(self.dev.name, self.base.name, self.dev_time_control)
 
@@ -387,6 +402,12 @@ class SPSARun(Model):
     pairs_per  = IntegerField()
     a_ratio    = FloatField()
 
+    # Convergence, see OpenBench/spsa_history.py. auto_stop is the largest drift of any
+    # parameter, in units of its C_end, at which the tune counts as converged. 0 disables it.
+    auto_stop     = FloatField(default=0.0)
+    converged_at  = IntegerField(null=True, blank=True) # Games played when it stopped as converged
+    last_snapshot = IntegerField(default=0)             # Games played at the latest SPSASnapshot
+
 class SPSAParameter(Model):
 
     spsa_run  = ForeignKey(SPSARun, on_delete=CASCADE, related_name='parameters')
@@ -403,6 +424,16 @@ class SPSAParameter(Model):
 
     c_value   = FloatField() # Constants pre-computed for speed
     a_value   = FloatField()
+
+class SPSASnapshot(Model):
+
+    # The values of every parameter, in the order of their index, every so many games
+    spsa_run = ForeignKey(SPSARun, on_delete=CASCADE, related_name='snapshots')
+    games    = IntegerField()
+    values   = JSONField(default=list)
+
+    class Meta:
+        ordering = ['games']
 
 class Workflow(Model):
 
@@ -458,3 +489,67 @@ class WorkflowNode(Model):
 
     def __str__(self):
         return '[%d] %s %s' % (self.workflow_id, self.key, self.state)
+
+class WorkflowTemplate(Model):
+
+    # A Workflow graph that is started for a pushed branch, see OpenBench/automation.py.
+    # '$branch' in the engines of its Nodes stands for the branch that was pushed.
+    name    = CharField(max_length=64, unique=True) # As in the marker [ob:<name>] of a commit message
+    author  = CharField(max_length=64)              # Workflows are created in this user's name
+    graph   = JSONField(default=dict)
+    enabled = BooleanField(default=True)
+    created = DateTimeField(auto_now_add=True)
+    updated = DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+
+class PushEvent(Model):
+
+    # A push that Github announced, processed by the WorkflowWatcher, see OpenBench/automation.py
+    delivery  = CharField(max_length=64, unique=True) # X-GitHub-Delivery, so that a redelivery is ignored
+    repo      = CharField(max_length=1024)
+    branch    = CharField(max_length=256)
+    sha       = CharField(max_length=64)
+    message   = TextField(default='', blank=True)
+    processed = BooleanField(default=False, db_index=True)
+    result    = CharField(max_length=1024, default='', blank=True)
+    created   = DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return '%s@%s' % (self.branch, self.sha[:8])
+
+class Ladder(Model):
+
+    # Measures each new commit of a branch against one fixed anchor commit, see OpenBench/ladder.py
+    name         = CharField(max_length=128)
+    author       = CharField(max_length=64)
+    engine       = CharField(max_length=64)
+    repo         = CharField(max_length=1024)
+    branch       = CharField(max_length=128, default='main')
+    anchor_sha   = CharField(max_length=64)
+    anchor_bench = IntegerField()
+    anchor_label = CharField(max_length=256, default='', blank=True)
+    settings     = JSONField(default=dict, blank=True) # Fields of the Test form, see ladder.build_post()
+    enabled      = BooleanField(default=True)
+    poll_hours   = IntegerField(default=6) # Github is asked for new commits this often, besides pushes
+    last_polled  = DateTimeField(null=True, blank=True)
+    created      = DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return '[%d] %s' % (self.id, self.name)
+
+class LadderPoint(Model):
+
+    ladder    = ForeignKey(Ladder, CASCADE, related_name='points')
+    sha       = CharField(max_length=64)
+    label     = CharField(max_length=256, default='', blank=True) # First line of the commit message
+    test      = ForeignKey(Test, SET_NULL, null=True, blank=True, related_name='ladder_points')
+    error     = CharField(max_length=1024, default='', blank=True) # Why no Test could be created
+    created   = DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+
+    def __str__(self):
+        return '[%d] %s' % (self.ladder_id, self.sha[:8])

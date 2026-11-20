@@ -27,11 +27,10 @@
 #
 # This module will either create the workload and return the user to the index,
 # which will display their newly created test. Or it will return them to index,
-# with a list of errors that need to be fixed. A warning may also be displayed,
-# if the Base branch appears ahead of the Dev branch.
+# with a list of errors that need to be fixed. Warnings may also be displayed,
+# see OpenBench/workloads/checks.py, for example if the Base appears ahead of the Dev.
 
 import math
-import requests
 
 from django.db import transaction
 
@@ -43,6 +42,7 @@ import OpenBench.views
 from OpenBench.config import OPENBENCH_CONFIG
 from OpenBench.models import *
 from OpenBench.workflows import notifications
+from OpenBench.workloads.checks import run_checks, describe as describe_checks
 from OpenBench.workloads.verify_workload import verify_workload
 
 def create_workload(request, workload_type):
@@ -107,10 +107,10 @@ def create_workload(request, workload_type):
         paths = { 'TEST' : '/test/new/', 'TUNE' : '/tune/new/', 'DATAGEN' : '/datagen/new/' }
         return OpenBench.views.redirect(request, paths[workload_type], error='\n'.join(errors))
 
-    if warning := branch_is_out_of_date(workload):
-        warning = 'Consider Rebasing: Dev (%s) appears behind Base (%s)' % (workload.dev.name, workload.base.name)
-
     finalize_workload(workload, request.user)
+
+    # Warnings like a Dev that is behind its Base, which the Workload's page keeps showing
+    warning = '\n'.join(describe_checks(workload.checks)) or None
 
     return OpenBench.views.redirect(request, '/index/', warning=warning)
 
@@ -123,6 +123,18 @@ def finalize_workload(workload, user):
 
     if not OPENBENCH_CONFIG['use_cross_approval'] and profile.approver:
         workload.approved = True; workload.save()
+
+    # Warnings about the engines, see OpenBench/workloads/checks.py
+    if workload.test_mode in ['SPRT', 'GAMES']:
+        workload.checks = run_checks(workload)
+        workload.save(update_fields=['checks'])
+
+def apply_sprt_bounds(test, bounds):
+
+    # Replaces the SPRT bounds of a Test that has not started, for example with non-regression
+    # bounds once its Dev turns out to have the same Bench as its Base. The confidence stays.
+    sprt = parse_sprt_fields(bounds, '[%r, %r]' % (test.beta, test.alpha))
+    test.elolower, test.eloupper = sprt['elolower'], sprt['eloupper']
 
 def create_new_test(request):
 
@@ -227,6 +239,7 @@ def create_new_tune(request):
     test.scale_nps        = int(request.POST['scale_nps'])
 
     test.test_mode        = 'SPSA'
+    test.notify           = notifications.test_level(request.POST.get('notify')) # Workflows send 'off'
 
     if test.dev_network:
         name = Network.objects.get(engine=test.dev_engine, sha256=test.dev_network).name
@@ -312,27 +325,3 @@ def create_new_datagen(request):
     profile.save()
 
     return test, None
-
-
-def branch_is_out_of_date(workload):
-
-    # Cannot compare across engines
-    if workload.dev_engine != workload.base_engine:
-        return False
-
-    # Format the request to the Github endpoint
-    base = 'https://api.github.com/repos/'
-    base = workload.dev_repo.replace('github.com', 'api.github.com/repos')
-    url  = OpenBench.utils.path_join(base, 'compare', '%s...%s' % (workload.dev.sha, workload.base.sha))
-
-    try:
-        # Out of date if ahead_by is non-zero
-        headers = OpenBench.utils.read_git_credentials(workload.dev_engine)
-        data    = requests.get(url, headers=headers).json()
-        return data.get('ahead_by', 0) > 0
-
-    except:
-        # If something went wrong, just ignore it
-        import traceback
-        traceback.print_exc()
-        return False

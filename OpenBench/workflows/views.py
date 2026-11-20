@@ -28,9 +28,11 @@
 #   /workflow/<id>/<action>/        POST: pause, resume, abort, retry, resolve
 
 import json
+import traceback
 
 from django.db.models import Count, Q
 from django.http import JsonResponse
+from django.utils import timezone
 
 import OpenBench.model_utils
 import OpenBench.stats
@@ -39,8 +41,11 @@ import OpenBench.views
 from OpenBench.config import OPENBENCH_CONFIG
 from OpenBench.models import Book, EngineConfig, Network, Profile, Workflow, WorkflowNode
 from OpenBench.templatetags.mytags import workload_url
+from OpenBench import error_watch
+from OpenBench.workflows import eta
 from OpenBench.workflows import graph as Graph
 from OpenBench.workflows import runner
+from OpenBench.workloads.checks import describe as describe_checks
 
 from OpenBench.workloads.modify_workload import bench_corrections
 
@@ -156,10 +161,7 @@ def edit_workflow(request, workflow):
 
 def workflow(request, pk, action=None):
 
-    # The state is polled by every open page, and never needs the graph
-    query = Workflow.objects.defer('graph') if action == 'state' else Workflow.objects
-
-    if not (workflow := query.filter(id=pk).first()):
+    if not (workflow := Workflow.objects.filter(id=pk).first()):
 
         # The editor and the polled state read JSON, which a redirect would only confuse
         if action in ['state', 'edit'] and (action == 'state' or request.method == 'POST'):
@@ -236,8 +238,15 @@ def workflow_state(workflow):
 
     # Everything the page needs to draw the progress of each Node
     nodes = {}
+    rows  = { node.key : node for node in workflow.nodes.select_related('test', 'test__spsa_run', 'test__dev', 'test__base') }
 
-    for node in workflow.nodes.select_related('test', 'test__spsa_run'):
+    # When each Node will start and finish, at the earliest, see OpenBench/workflows/eta.py
+    try: times = eta.estimate(workflow.graph, rows, timezone.now()) if not workflow.is_final() else {}
+    except Exception:
+        traceback.print_exc()
+        times = {}
+
+    for node in rows.values():
         nodes[node.key] = {
             'state'   : node.state,
             'outcome' : node.outcome,
@@ -249,9 +258,15 @@ def workflow_state(workflow):
             'ports'   :Graph.outcomes(node.kind), # What the Node can be decided as, by hand
             'test'    : test_state(node.test) if node.test else None,
             'bench'   : bench_state(node) if node.state == 'STOPPED' and node.test else None,
+            'eta'     : eta.serialize({ node.key : times[node.key] })[node.key] if node.key in times else None,
         }
 
-    return { 'status' : workflow.status, 'paused' : workflow.paused, 'nodes' : nodes }
+    # The last Node that may still run, at the earliest
+    finishes = [times[key]['finish'] for key, node in rows.items() if key in times and node.state in ['WAITING', 'RUNNING']]
+    finish   = max(finishes) if finishes and None not in finishes else None
+
+    return { 'status' : workflow.status, 'paused' : workflow.paused, 'nodes' : nodes,
+             'finish' : finish.isoformat() if finish else None }
 
 def bench_state(node):
 
@@ -282,5 +297,12 @@ def test_state(test):
     if test.test_mode == 'SPSA':
         total = 2 * test.spsa_run.pairs_per * test.spsa_run.iterations
         state['summary'] = '%.1f%% of %d' % (100.0 * test.games / max(1, total), total)
+        if test.spsa_run.converged_at is not None:
+            state['summary'] += ', converged'
+
+    # Warnings from its creation, and errors while playing
+    state['warnings'] = describe_checks(test.checks or {})
+    if test.crashes or test.timelosses or test.illegals:
+        state['errors'] = error_watch.summary({ 'crashes' : test.crashes, 'timelosses' : test.timelosses, 'illegals' : test.illegals })
 
     return state

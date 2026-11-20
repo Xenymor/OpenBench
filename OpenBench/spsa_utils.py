@@ -60,6 +60,7 @@ def create_spsa_run(workload, request):
         iterations        = iterations,
         pairs_per         = int(request.POST['spsa_pairs_per']),
         a_ratio           = a_ratio,
+        auto_stop         = float(request.POST.get('spsa_auto_stop') or 0.0),
     )
 
     params = []

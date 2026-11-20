@@ -27,6 +27,7 @@
 
 from django.db import transaction
 
+import OpenBench.error_watch
 import OpenBench.utils
 import OpenBench.views
 
@@ -98,6 +99,7 @@ def approve_workload(request, profile, workload):
 def restart_workload(request, profile, workload):
     workload.finished = False;
     workload.rate_updated = None # Time spent stopped should not count towards the throughput
+    OpenBench.error_watch.reset_baseline(workload) # The error limits count from the restart on
     return 'Workload was Restarted!'
 
 def rebench_workload(request, profile, workload):
@@ -129,6 +131,7 @@ def apply_measured_bench(workload):
 
     workload.finished     = False
     workload.rate_updated = None # Time spent stopped should not count towards the throughput
+    OpenBench.error_watch.reset_baseline(workload)
 
     changes = ', '.join('%s %d -> %d' % (side.title(), info['given'], info['measured'][0]) for side, info in corrections.items())
     return 'Workload was Restarted with the measured Bench (%s)!' % (changes)
@@ -163,5 +166,12 @@ def tweak_workload(request, profile, workload):
     try:
         workload.info = request.POST['info']
     except: pass
+
+    # The experiment journal, see the search and the changelog
+    if 'tags' in request.POST:
+        workload.tags = ' '.join(dict.fromkeys(request.POST['tags'].replace(',', ' ').split()))[:256]
+
+    if 'notes' in request.POST:
+        workload.notes = request.POST['notes'][:20000]
 
     return 'Workload was Modified!'
