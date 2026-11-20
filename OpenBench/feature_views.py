@@ -23,7 +23,7 @@
 #   /api/github/push/           Github's webhook, see OpenBench/automation.py
 #   /ladders/                   List of all Ladders, and the form to create one
 #   /ladder/<id>/               The course of a Ladder
-#   /ladder/<id>/<action>/      POST: measure, toggle, delete
+#   /ladder/<id>/<action>/      POST: measure, anchor, toggle, delete
 #   /changelog/                 Passed SPRTs over a span of time, ready to paste
 
 import datetime
@@ -78,7 +78,7 @@ def ladders(request):
 
     rows = []
     for item in Ladder.objects.order_by('-id'):
-        latest = next((row for row in reversed(ladder.points(item)) if 'elo' in row), None)
+        latest = next((row for row in reversed(ladder.points(item)) if 'elo' in row and row['current']), None)
         rows.append({ 'ladder' : item, 'latest' : latest, 'count' : item.points.count() })
 
     data = {
@@ -121,6 +121,11 @@ def ladder_view(request, pk, action=None):
         if point.error:
             return OpenBench.views.redirect(request, target, error=point.error)
         return OpenBench.views.redirect(request, target, status='Measuring %s' % (point.sha[:8]))
+
+    if action == 'anchor':
+        if errors := ladder.set_anchor(item, request.POST.get('anchor', ''), request.POST.get('anchor_bench', '')):
+            return OpenBench.views.redirect(request, target, error='\n'.join(errors))
+        return OpenBench.views.redirect(request, target, status='The anchor is %s from now on' % (item.anchor_sha[:8]))
 
     if action == 'toggle':
         item.enabled = not item.enabled

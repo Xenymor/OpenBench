@@ -14,7 +14,8 @@
     <script>
         document.addEventListener('DOMContentLoaded', function () {
 
-            const points = JSON.parse(document.getElementById('json-points').textContent).filter(point => 'elo' in point);
+            // Elo against another anchor is not comparable, so only the current anchor makes up the line
+            const points = JSON.parse(document.getElementById('json-points').textContent).filter(point => 'elo' in point && point.current);
             const time   = point => new Date(point.created).getTime();
             const label  = point => point.sha.slice(0, 8) + ' ' + point.label + ': ' + point.elo.toFixed(2)
                                   + ' ± ' + ((point.upper - point.lower) / 2).toFixed(2) + ' Elo, ' + point.games + ' games'
@@ -65,10 +66,20 @@
         <tr><td class="td-label">Polls</td><td>every {{ ladder.poll_hours }} hours, and on pushes</td></tr>
     </table>
 
+    {% if can_change %}
+        <form method="POST" action="/ladder/{{ ladder.id }}/anchor/" class="mt-2"
+              onsubmit="return confirm('Measure against this anchor from now on? Earlier points stay, but leave the line.');">
+            {% csrf_token %}
+            <input name="anchor" placeholder="New anchor: sha, branch or tag" style="width: 260px;">
+            <input name="anchor_bench" placeholder="Bench (autofill)" style="width: 140px;">
+            <button class="anchorbutton btn-yellow" type="submit">Change Anchor</button>
+        </form>
+    {% endif %}
+
     <div id="ladder-chart" class="w-100 mt-3"></div>
 
     <table class="hoverable mt-3">
-        <tr class="table-header"><th>Measured</th><th>Commit</th><th>Message</th><th>Elo</th><th>Games</th><th>Test</th></tr>
+        <tr class="table-header"><th>Measured</th><th>Commit</th><th>Message</th><th>Elo</th><th>Games</th><th>Test</th><th>Anchor</th></tr>
         {% for point in points reversed %}
             <tr>
                 <td>{{ point.created|slice:":16" }}</td>
@@ -77,9 +88,10 @@
                 <td>{% if 'elo' in point %}{{ point.elo|floatformat:2 }} [{{ point.lower|floatformat:2 }}, {{ point.upper|floatformat:2 }}]{% elif point.error %}<span style="color: #FA9696; white-space: normal;">{{ point.error|truncatechars:120 }}</span>{% else %}-{% endif %}</td>
                 <td>{% if 'elo' in point %}{{ point.games }} / {{ point.max_games }}{% endif %}</td>
                 <td>{% if point.test %}<a href="/test/{{ point.test }}/">#{{ point.test }}</a>{% endif %}</td>
+                <td>{% if point.current %}current{% else %}{{ point.anchor|slice:":8"|default:"?" }}{% endif %}</td>
             </tr>
         {% empty %}
-            <tr><td colspan="6">Nothing measured yet</td></tr>
+            <tr><td colspan="7">Nothing measured yet</td></tr>
         {% endfor %}
     </table>
 

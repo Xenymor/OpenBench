@@ -970,3 +970,61 @@ class PageTests(TestCase):
         page = self.client.get('/index/')
         for link in ['/workflow/templates/', '/ladders/', '/changelog/']:
             self.assertContains(page, 'href="%s"' % (link))
+
+@mock.patch('OpenBench.workloads.verify_workload.collect_github_info', TW.fake_github)
+@mock.patch('OpenBench.workloads.create_workload.run_checks', lambda workload, check_base=False: {})
+@mock.patch('OpenBench.workflows.runner.lookup_commit', TW.fake_commit)
+class FollowUpTests(TestCase):
+
+    setUp    = TW.RunnerTests.setUp
+    defaults = TW.RunnerTests.defaults
+    create   = TW.RunnerTests.create
+    nodes    = TW.RunnerTests.nodes
+
+    def test_ladder_anchor_defaults_to_the_head_and_can_change(self):
+
+        fake = FakeGithub(heads={ 'main' : TW.fake_sha('head') }); fake.install(self)
+        created, errors = ladder.create_ladder(self.user, { 'name' : 'Main', 'engine' : 'Fispur', 'games' : '100' })
+        self.assertEqual(created.anchor_sha, TW.fake_sha('head')) # The current main
+
+        fake.heads['main'] = TW.fake_sha('newer')
+        first = ladder.measure(created)
+        self.assertEqual((first.anchor, ladder.measure(created)), (TW.fake_sha('head'), None))
+
+        # A new anchor by its sha: the head is measured again against it, and the old point leaves the line
+        self.client.force_login(self.user)
+        self.client.post('/ladder/%d/anchor/' % (created.id), { 'anchor' : TW.fake_sha('older'), 'anchor_bench' : '777' })
+        created = Ladder.objects.get(id=created.id)
+        self.assertEqual((created.anchor_sha, created.anchor_bench, created.last_polled), (TW.fake_sha('older'), 777, None))
+
+        second = ladder.measure(created)
+        self.assertEqual((second.anchor, second.test.base.sha, second.test.base.bench), (TW.fake_sha('older'), TW.fake_sha('older'), 777))
+        self.assertEqual([row['current'] for row in ladder.points(created)], [False, True])
+
+        self.assertEqual(ladder.set_anchor(created, ''), ['Give the sha, branch or tag of the new anchor'])
+        self.assertEqual(ladder.set_anchor(created, 'x', 'abc'), ['The anchor Bench must be a positive number, or empty to autofill it'])
+
+    def test_auto_stop_of_running_tunes(self):
+
+        graph = { 'defaults' : {}, 'edges' : [], 'nodes' : { 'tune' : node('SPSA', dev='x', spsa_inputs='A, int, 10, 0, 100, 2, 0.002') } }
+        test  = self.nodes(self.create(graph))['tune'].test
+        self.assertEqual(test.spsa_run.auto_stop, 0.0)
+
+        self.client.force_login(self.user)
+        self.assertContains(self.client.get('/tune/%d/' % (test.id)), 'name="auto_stop"')
+        self.client.post('/tune/%d/MODIFY/' % (test.id), { 'auto_stop' : '0.75', 'priority' : '0', 'throughput' : '1000' })
+        self.assertEqual(Test.objects.get(id=test.id).spsa_run.auto_stop, 0.75)
+
+    def test_history_must_cover_the_window(self):
+
+        graph = { 'defaults' : {}, 'edges' : [], 'nodes' : { 'tune' : node('SPSA', dev='x', spsa_inputs='A, int, 10, 0, 100, 2, 0.002') } }
+        run   = self.nodes(self.create(graph))['tune'].test.spsa_run
+        run.iterations = 1000 # 4000 games, so the window is 800 games
+        params = list(run.parameters.all())
+
+        # A tune whose history only started late, at 3400 of 4000 games: settled, but not long enough known
+        late = [(games, [50.0]) for games in range(3400, 3801, 20)]
+        self.assertIsNone(spsa_history.window_drift(run, params, late))
+
+        full = [(games, [50.0]) for games in range(2000, 3801, 20)]
+        self.assertEqual(spsa_history.window_drift(run, params, full), 0.0)

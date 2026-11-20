@@ -167,6 +167,13 @@ def tweak_workload(request, profile, workload):
         workload.info = request.POST['info']
     except: pass
 
+    # Tunes may stop once converged, also after they started, see OpenBench/spsa_history.py
+    if workload.test_mode == 'SPSA' and 'auto_stop' in request.POST:
+        try:
+            workload.spsa_run.auto_stop = min(100.0, max(0.0, float(request.POST['auto_stop'] or 0)))
+            workload.spsa_run.save(update_fields=['auto_stop'])
+        except ValueError: pass
+
     # The experiment journal, see the search and the changelog
     if 'tags' in request.POST:
         workload.tags = ' '.join(dict.fromkeys(request.POST['tags'].replace(',', ' ').split()))[:256]

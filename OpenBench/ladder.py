@@ -25,6 +25,11 @@
 #
 #   >>> ladder, errors = create_ladder(user, fields)   # The anchor is the branch's head by default
 #   >>> measure(ladder)                                 # Tests the branch's head, if it is new
+#   >>> errors = set_anchor(ladder, 'abc1234', '')      # Another anchor, from now on
+#
+# The anchor can be changed later. Points keep the anchor they were measured against, and only
+# those of the current anchor make up the line, since Elo against another anchor is not comparable.
+# The head of the branch is measured again against the new anchor right away.
 #
 # A Ladder looks at its branch every poll_hours, from the WorkflowWatcher. Pushes that Github
 # announces, see OpenBench/automation.py, and MERGE Nodes ask it to look right away, through
@@ -100,8 +105,6 @@ def build_post(ladder, dev_sha):
 def create_ladder(user, fields):
 
     # (Ladder, None), or (None, errors). fields are those of the form on /ladders/
-    from OpenBench.workloads.verify_workload import known_bench, message_bench, parse_bench
-
     errors = []
     name   = str(fields.get('name', '')).strip()
     engine = str(fields.get('engine', '')).strip()
@@ -132,16 +135,9 @@ def create_ladder(user, fields):
     if errors:
         return None, errors
 
-    try: commit = github.commit(repo, engine, anchor)
-    except github.GithubError as error:
-        return None, ['%s could not be found: %s' % (anchor, error)]
-
-    given = parse_bench(fields.get('anchor_bench', ''))
-    known = known_bench(engine, commit['sha'], network)
-    bench = given or (known[0] if known else None) or message_bench(commit['message'])
-
-    if not bench:
-        return None, ['Unable to find a Bench for the anchor %s, so please give it' % (commit['sha'][:8])]
+    try: commit, bench = resolve_anchor(engine, repo, anchor, fields.get('anchor_bench', ''), network)
+    except ValueError as error:
+        return None, [str(error)]
 
     settings = { field : str(fields.get(field, '') or '').strip() for field in SETTINGS }
     settings['games'] = str(games)
@@ -152,6 +148,45 @@ def create_ladder(user, fields):
         settings=settings, poll_hours=poll_hours)
 
     return ladder, None
+
+def resolve_anchor(engine, repo, ref, given_bench, network):
+
+    # (commit, bench), or raises ValueError with what went wrong
+    from OpenBench.workloads.verify_workload import known_bench, message_bench, parse_bench
+
+    try: commit = github.commit(repo, engine, ref)
+    except github.GithubError as error:
+        raise ValueError('%s could not be found: %s' % (ref, error))
+
+    given = parse_bench(given_bench)
+    if given == 0:
+        raise ValueError('The anchor Bench must be a positive number, or empty to autofill it')
+
+    known = known_bench(engine, commit['sha'], network)
+    bench = given or (known[0] if known else None) or message_bench(commit['message'])
+
+    if not bench:
+        raise ValueError('Unable to find a Bench for the anchor %s, so please give it' % (commit['sha'][:8]))
+
+    return commit, bench
+
+def set_anchor(ladder, ref, given_bench=''):
+
+    # Errors, or [] once the Ladder measures against the commit of ref from now on
+    ref = str(ref or '').strip()
+    if not ref:
+        return ['Give the sha, branch or tag of the new anchor']
+
+    try: commit, bench = resolve_anchor(ladder.engine, ladder.repo, ref, given_bench, (ladder.settings or {}).get('network', ''))
+    except ValueError as error:
+        return [str(error)]
+
+    ladder.anchor_sha   = commit['sha']
+    ladder.anchor_bench = bench
+    ladder.anchor_label = first_line(commit['message'])
+    ladder.last_polled  = None # Measure the head against it right away
+    ladder.save()
+    return []
 
 def first_line(message):
     return (message or '').strip().split('\n')[0][:256]
@@ -165,12 +200,14 @@ def measure(ladder, force=False):
     # Starts a Test for the head of the branch, unless it was measured already. Returns
     # the new LadderPoint, or None. force measures it again, for example after it failed.
     commit = github.commit(ladder.repo, ladder.engine, ladder.branch)
-    last   = ladder.points.order_by('-id').first()
 
     if commit['sha'] == ladder.anchor_sha:
         return None
 
-    if last and last.sha == commit['sha'] and not (force and (last.error or not last.test or last.test.deleted)):
+    # Measured once against each anchor. Forced, a measurement that failed or was deleted is repeated.
+    done = [point for point in ladder.points.filter(sha=commit['sha'], anchor=ladder.anchor_sha).select_related('test')
+            if not (force and (point.error or not point.test or point.test.deleted))]
+    if done:
         return None
 
     return create_point(ladder, commit)
@@ -183,7 +220,7 @@ def create_point(ladder, commit):
 
     user    = User.objects.get(username=ladder.author)
     request = SimpleNamespace(POST=build_post(ladder, commit['sha']), user=user)
-    point   = LadderPoint(ladder=ladder, sha=commit['sha'], label=first_line(commit['message']))
+    point   = LadderPoint(ladder=ladder, sha=commit['sha'], anchor=ladder.anchor_sha, label=first_line(commit['message']))
 
     try:
         with transaction.atomic():
@@ -243,7 +280,8 @@ def points(ladder):
 
     for point in ladder.points.select_related('test').order_by('id'):
 
-        row = { 'sha' : point.sha, 'label' : point.label, 'created' : point.created.isoformat(), 'error' : point.error }
+        row = { 'sha' : point.sha, 'label' : point.label, 'created' : point.created.isoformat(), 'error' : point.error,
+                'current' : point.anchor == ladder.anchor_sha, 'anchor' : point.anchor }
 
         if (test := point.test) and not test.deleted:
             lower, elo, upper = OpenBench.stats.Elo(test.results())

@@ -235,6 +235,13 @@
                         <input value="{{workload.throughput}}" id="throughput" name="throughput">
                     </div>
 
+                    {% if type == "TUNE" %}
+                        <div class="row workflow-edit" title="Stops once no parameter moved by more than this many C_end over the last 20% of the planned games, after at least 30% of them. 0 never stops early.">
+                            <label for="auto_stop">Auto-Stop</label>
+                            <input value="{{workload.spsa_run.auto_stop}}" id="auto_stop" name="auto_stop">
+                        </div>
+                    {% endif %}
+
                     {% if type == "TEST" or type == "DATAGEN" %}
                         <div class="row workflow-edit">
                             <label for="workload_size">Workload Size</label>

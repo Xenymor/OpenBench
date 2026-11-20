@@ -543,6 +543,7 @@ class LadderPoint(Model):
 
     ladder    = ForeignKey(Ladder, CASCADE, related_name='points')
     sha       = CharField(max_length=64)
+    anchor    = CharField(max_length=64, default='', blank=True)  # The anchor it was measured against
     label     = CharField(max_length=256, default='', blank=True) # First line of the commit message
     test      = ForeignKey(Test, SET_NULL, null=True, blank=True, related_name='ladder_points')
     error     = CharField(max_length=1024, default='', blank=True) # Why no Test could be created

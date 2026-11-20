@@ -27,6 +27,7 @@
 # SPSASnapshot, at most SNAPSHOTS of them over the whole tune, which the tune's page draws.
 #
 # A tune with SPSARun.auto_stop > 0 stops once it converged: after MIN_PROGRESS of its games,
+# and once its history reaches back over the whole WINDOW,
 # no parameter moved by more than auto_stop times its C_end over the last WINDOW of the games.
 # Movement is the difference between the averages of the first and the second half of that
 # window, so that the noise of single steps does not count. The Test is then finished, and
@@ -81,7 +82,9 @@ def window_drift(run, parameters, snapshots=None):
     start  = snapshots[-1][0] - WINDOW * total
     window = [values for games, values in snapshots if games >= start]
 
-    if len(window) < MIN_POINTS:
+    # The history must reach back over the whole window. Tunes that ran before the history
+    # was kept start theirs late, and a shorter span would show too little movement.
+    if len(window) < MIN_POINTS or snapshots[0][0] > start + interval(run):
         return None
 
     half  = len(window) // 2
