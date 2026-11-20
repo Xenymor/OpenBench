@@ -95,10 +95,14 @@ def shortStatBlock(test):
     speed = 'Speed: %s' % ('-' if gpm is None else '%0.1f games/min' % (gpm))
 
     # How long it still runs at that speed, see OpenBench/eta.py
-    if not test.finished and gpm:
+    if not test.finished and gpm and gpm >= OpenBench.eta.MIN_RATE:
         speed += ' ETA: %s' % (OpenBench.eta.describe(OpenBench.eta.remaining_seconds(test, now)))
 
     statlines.append(speed)
+
+    # How likely a running SPRT passes, see OpenBench/eta.py
+    if test.test_mode == 'SPRT' and not test.finished and (chance := OpenBench.eta.pass_probability(test)) is not None:
+        statlines.append('Pass: %s' % (OpenBench.eta.describe_probability(chance)))
 
     return '\n'.join(statlines)
 

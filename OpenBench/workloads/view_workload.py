@@ -68,6 +68,8 @@ def view_workload(request, workload, workload_type):
     # How long it still runs, see OpenBench/eta.py
     if not workload.finished:
         data['eta'] = OpenBench.eta.describe(OpenBench.eta.remaining_seconds(workload, timezone.now()))
+        if (chance := OpenBench.eta.pass_probability(workload)) is not None:
+            data['pass_chance'] = OpenBench.eta.describe_probability(chance)
 
     # Earlier Workloads of the same branch, so that an idea is not tried twice unknowingly
     data['related'] = (Test.objects.filter(dev__name=workload.dev.name, dev_engine=workload.dev_engine, deleted=False)

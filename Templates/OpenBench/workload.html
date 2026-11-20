@@ -87,6 +87,9 @@
             {% if eta %}
                 <tr><td class="td-label">ETA</td><td>{{eta}}</td></tr>
             {% endif %}
+            {% if pass_chance %}
+                <tr><td class="td-label">Pass Chance</td><td title="Probability that the SPRT passes, from its results so far and the Elo of earlier SPRTs">{{pass_chance}}</td></tr>
+            {% endif %}
             {% if errors %}
                 <tr><td class="td-label">Errors</td><td>{{errors}}</td></tr>
             {% endif %}

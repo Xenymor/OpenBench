@@ -23,6 +23,7 @@
 # python manage.py test OpenBench
 
 import datetime
+import math
 
 from types import SimpleNamespace
 from unittest import mock
@@ -167,6 +168,10 @@ class EtaTests(SimpleTestCase):
         now  = timezone.now()
         test = self.sprt(rate_games=600.0, rate_time=3600.0, rate_updated=now) # 10 games per minute
         self.assertAlmostEqual(OpenBench.eta.remaining_seconds(test, now), 3840 * 6.0)
+
+        # A Test that stands still has no end in sight
+        stalled = self.sprt(rate_games=1.0, rate_time=3600.0, rate_updated=now)
+        self.assertIsNone(OpenBench.eta.remaining_seconds(stalled, now))
 
         self.assertEqual(OpenBench.eta.describe(None), '-')
         self.assertEqual(OpenBench.eta.describe(10), '<1m')
@@ -1184,3 +1189,82 @@ class ReviewTests(TestCase):
         fake = FakeGithub(); fake.install(self)
         errors = ladder.create_ladder(self.user, { 'name' : 'x', 'engine' : 'Fispur', 'branch' : 'b' * 200 })[1]
         self.assertIn('The branch must have at most 128 characters, and the anchor at most 256', errors)
+
+class PassProbabilityTests(TestCase):
+
+    def sprt(self, llr, penta=(100, 600, 1200, 700, 150), **fields):
+        lower, upper = math.log(0.05 / 0.95), math.log(0.95 / 0.05)
+        return Test(**{ 'test_mode' : 'SPRT', 'use_penta' : True, 'elolower' : 0.0, 'eloupper' : 3.0, 'lowerllr' : lower,
+                        'upperllr' : upper, 'currentllr' : llr, 'LL' : penta[0], 'LD' : penta[1], 'DD' : penta[2],
+                        'DW' : penta[3], 'WW' : penta[4], **fields })
+
+    def test_probabilities(self):
+
+        prior = (0.0, 3.0)
+        # Results from losing to winning, with the LLR that OpenBench computes for them
+        from OpenBench.stats import PentanomialSPRT
+        results = [(190, 640, 1200, 560, 110), (160, 610, 1200, 590, 140), (150, 600, 1200, 600, 150),
+                   (140, 590, 1200, 610, 160), (110, 560, 1200, 640, 190)]
+        chances = [OpenBench.eta.pass_probability(self.sprt(PentanomialSPRT(list(penta), 0.0, 3.0), penta), prior) for penta in results]
+        self.assertEqual(chances, sorted(chances)) # Better results pass more likely
+        self.assertGreater(chances[-1], 0.9)
+        self.assertLess(chances[0], 0.1)
+
+        # Decided Tests, and too few games to tell
+        self.assertEqual(OpenBench.eta.pass_probability(self.sprt(3.0, passed=True, finished=True), prior), 1.0)
+        self.assertEqual(OpenBench.eta.pass_probability(self.sprt(-3.0, failed=True, finished=True), prior), 0.0)
+        self.assertIsNone(OpenBench.eta.pass_probability(self.sprt(0.0, penta=(1, 10, 20, 10, 1)), prior))
+        self.assertIsNone(OpenBench.eta.pass_probability(Test(test_mode='GAMES'), prior))
+
+        # A narrow prior around a loss makes passing less likely than a wide one
+        self.assertLess(OpenBench.eta.pass_probability(self.sprt(0.5), (-2.0, 1.0)), OpenBench.eta.pass_probability(self.sprt(0.5), (0.0, 5.0)))
+        self.assertEqual(OpenBench.eta.describe_probability(0.734), '73%')
+        self.assertEqual(OpenBench.eta.describe_probability(None), '-')
+
+    def test_prior_from_history(self):
+
+        OpenBench.eta._prior_cache.update(time=0.0, value=None)
+        self.assertEqual(OpenBench.eta.elo_prior(), OpenBench.eta.PRIOR) # Too little history
+
+        user = User.objects.create_user('x', password='x')
+        engine = Engine.objects.create(name='e', source='', sha='a' * 40, bench=1)
+        for index in range(30):
+            # Pentanomials around +2 Elo, of growing size
+            k = 2000 + 100 * index
+            Test.objects.create(author='x', book_name='b', dev=engine, base=engine, test_mode='SPRT', finished=True,
+                                games=2 * k, LL=k // 20, LD=k // 5, DD=k // 2, DW=k // 5 + k // 100, WW=k // 20)
+
+        OpenBench.eta._prior_cache.update(time=0.0, value=None)
+        mean, spread = OpenBench.eta.elo_prior()
+        self.assertGreater(mean, 0.5)
+        self.assertGreaterEqual(spread, OpenBench.eta.PRIOR_MIN)
+
+        # Kept for a while, without asking the database again
+        with self.assertNumQueries(0):
+            self.assertEqual(OpenBench.eta.elo_prior(), (mean, spread))
+        OpenBench.eta._prior_cache.update(time=0.0, value=None)
+
+@mock.patch('OpenBench.workloads.verify_workload.collect_github_info', TW.fake_github)
+@mock.patch('OpenBench.workloads.create_workload.run_checks', lambda workload, check_base=False: {})
+@mock.patch('OpenBench.workflows.runner.lookup_commit', TW.fake_commit)
+class PassChancePageTests(TestCase):
+
+    setUp    = TW.RunnerTests.setUp
+    defaults = TW.RunnerTests.defaults
+    create   = TW.RunnerTests.create
+    nodes    = TW.RunnerTests.nodes
+
+    def test_pass_chance_is_shown(self):
+
+        workflow = self.create({ 'defaults' : {}, 'edges' : [], 'nodes' : { 'a' : node('SPRT', dev='lmr', base='main') } })
+        test     = self.nodes(workflow)['a'].test
+        Test.objects.filter(id=test.id).update(currentllr=1.8, LL=100, LD=600, DD=1200, DW=700, WW=150, games=5500)
+
+        self.client.force_login(self.user)
+        self.assertContains(self.client.get('/test/%d/' % (test.id)), 'Pass Chance')
+        self.assertContains(self.client.get('/index/'), 'Pass: ')
+        self.assertIn('· pass ', self.client.get('/workflow/%d/state/' % (workflow.id)).json()['nodes']['a']['test']['elo'])
+
+        # Not once it is decided
+        Test.objects.filter(id=test.id).update(finished=True, passed=True)
+        self.assertNotContains(self.client.get('/test/%d/' % (test.id)), 'Pass Chance')

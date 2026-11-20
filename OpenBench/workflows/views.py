@@ -35,6 +35,7 @@ from django.db.models import Count, Q
 from django.http import JsonResponse
 from django.utils import timezone
 
+import OpenBench.eta
 import OpenBench.model_utils
 import OpenBench.stats
 import OpenBench.views
@@ -295,6 +296,10 @@ def test_state(test):
         lower, elo, upper = OpenBench.stats.Elo(test.results())
         state['summary'] = 'LLR %.2f (%.2f, %.2f)' % (test.currentllr, test.lowerllr, test.upperllr)
         state['elo']     = 'Elo %+.2f ± %.2f' % (elo, max(upper - elo, elo - lower))
+
+        # How likely it passes, while it runs, see OpenBench/eta.py
+        if not test.finished and (chance := OpenBench.eta.pass_probability(test)) is not None:
+            state['elo'] += ' · pass %s' % (OpenBench.eta.describe_probability(chance))
 
     if test.test_mode == 'SPSA':
         total = 2 * test.spsa_run.pairs_per * test.spsa_run.iterations
