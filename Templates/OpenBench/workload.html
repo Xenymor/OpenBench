@@ -7,6 +7,7 @@
 
 {% block scripts %}
 
+    <script src="{% static 'charts.js' %}?{{ static_version }}"></script>
     <script src="{% static 'workload_utils.js' %}?{{ static_version }}"></script>
 
     <script>
@@ -20,6 +21,14 @@
 {% block content %}
 
     <div class="workload-container">
+
+    <!-- Stopped by the Server, and warnings from its creation, see OpenBench/error_watch.py and checks.py -->
+    {% if workload.stop_reason and workload.finished %}
+        <div class="error-message"><pre>{{workload.stop_reason}}</pre></div>
+    {% endif %}
+    {% if warnings %}
+        <div class="warning-message"><pre>{% for warning in warnings %}{{warning}}{% if not forloop.last %}<br>{% endif %}{% endfor %}</pre></div>
+    {% endif %}
 
     <div id="config" style="display: block; overflow-x: auto;">
         <table class="test-config left-align wrappable" style="table-layout: auto; width: 100%;">
@@ -70,6 +79,25 @@
             {% elif type == "DATAGEN" %}
                 <tr><td class="td-label">Genfens Args</td><td>{{workload.genfens_args}}</td></tr>
                 <tr><td class="td-label">Play Reverses</td><td>{{workload.play_reverses}}</td></tr>
+            {% endif %}
+
+            {% if workload.tags %}
+                <tr><td class="td-label">Tags</td><td>{% for tag in workload.tags.split %}<a href="/search/?tags={{tag|urlencode}}">{{tag}}</a> {% endfor %}</td></tr>
+            {% endif %}
+            {% if eta %}
+                <tr><td class="td-label">ETA</td><td>{{eta}}</td></tr>
+            {% endif %}
+            {% if errors %}
+                <tr><td class="td-label">Errors</td><td>{{errors}}</td></tr>
+            {% endif %}
+            {% if type == "TUNE" and workload.spsa_run.auto_stop %}
+                <tr><td class="td-label">Auto-Stop</td><td>
+                    Below {{workload.spsa_run.auto_stop}} C_end of drift
+                    {% if workload.spsa_run.converged_at %} &middot; converged after {{workload.spsa_run.converged_at}} games{% endif %}
+                </td></tr>
+            {% endif %}
+            {% if ladder_point %}
+                <tr><td class="td-label">Ladder</td><td><a href="/ladder/{{ladder_point.ladder.id}}/">#{{ladder_point.ladder.id}} {{ladder_point.ladder.name}}</a></td></tr>
             {% endif %}
 
             {% if workflow_node %}
@@ -188,6 +216,16 @@
                     </div>
 
                     <div class="row workflow-edit">
+                        <label for="tags">Tags</label>
+                        <input value="{{workload.tags}}" id="tags" name="tags" placeholder="Separated by spaces, e.g. search lmr">
+                    </div>
+
+                    <div class="row workflow-edit">
+                        <label for="notes">Notes</label>
+                        <textarea id="notes" name="notes" rows="4" placeholder="What was tried, and what was learned">{{workload.notes}}</textarea>
+                    </div>
+
+                    <div class="row workflow-edit">
                         <label for="priority">Priority</label>
                         <input value="{{workload.priority}}" id="priority" name="priority">
                     </div>
@@ -242,6 +280,29 @@
                 <tbody id="spsa-digest-body-container" style="display: none;">
                     <!-- Dynamically created -->
                 </tbody>
+            </table>
+        </div>
+    {% endif %}
+
+    <!-- The course of every parameter, see OpenBench/spsa_history.py -->
+    {% if type == "TUNE" %}
+        <div id="spsa-history" class="w-100 mt-3" style="float:left;">
+            <button class="w-100 anchorbutton btn-blue" type="button" onclick="fetch_spsa_history({{workload.id}})">Show SPSA History</button>
+            <div id="spsa-history-container"></div>
+        </div>
+    {% endif %}
+
+    <!-- Earlier Workloads of the same branch -->
+    {% if related %}
+        <div id="related" class="w-100 mt-3" style="float:left;">
+            <h4>Earlier Workloads of {{workload.dev.name}}</h4>
+            <table class="test-list stripes hoverable">
+                {% for test in related %}
+                    <tr>
+                        <td class="datestamp">{{test.creation|date:"U"}}</td>
+                        {% include "OpenBench/Blocks/testsummary.html" %}
+                    </tr>
+                {% endfor %}
             </table>
         </div>
     {% endif %}

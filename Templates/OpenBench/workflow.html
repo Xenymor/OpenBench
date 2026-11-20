@@ -40,6 +40,7 @@
             &middot; <span id="wf-status" class="wf-status wf-status-{{ workflow.status }}">{{ workflow.status }}</span>
             &middot; {{ workflow.author|capfirst }}
             &middot; <span class="timestamp">{{ workflow.created|date:'U' }}</span>
+            <span id="wf-finish" class="wf-finish"></span>
         </h3>
 
         {% if can_modify and not workflow.is_final %}
@@ -66,6 +67,7 @@
         {% endif %}
 
         <a class="anchorbutton btn-blue" href="/workflow/new/?clone={{ workflow.id }}">Clone</a>
+        <a class="anchorbutton btn-blue" href="/workflow/templates/new/?from={{ workflow.id }}" title="Start a Template from this Workflow, which pushes can start">Save as Template</a>
 
         {% if can_modify %}
             <form method="POST" action="/workflow/{{ workflow.id }}/delete/"

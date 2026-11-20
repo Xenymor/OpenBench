@@ -20,14 +20,15 @@
 
 # Warnings about a new Test, kept in Test.checks, and shown on its page:
 #
-#   >>> checks = run_checks(test)
+#   >>> checks = run_checks(test, check_base=True)
 #   { 'same_bench' : True, 'behind' : 3, 'base_moved' : 2, 'base_branch' : 'main' }
 #
 #   same_bench  Dev and Base have the same Bench, with the same options and Network. The change
 #               is then very likely not functional, and needs no SPRT with gainer bounds.
 #   behind      Dev lacks this many commits of Base, so the result mixes in their effect.
 #   base_moved  Base was given as a branch, which has this many commits more by now. That
-#               happens to Workflows, whose branches are pinned when they are saved.
+#               happens to Workflows, whose branches are pinned when they are saved. Only
+#               looked at with check_base, since the form resolves the branch right before.
 #
 # Only keys with a finding are kept. Github is asked once per check, and any failure there
 # only drops that check, so that a Test is never held up by it.
@@ -46,7 +47,7 @@ def same_bench(test):
             and test.dev_options == test.base_options
             and test.dev_network == test.base_network)
 
-def run_checks(test):
+def run_checks(test, check_base=False):
 
     checks = {}
 
@@ -68,7 +69,7 @@ def run_checks(test):
 
     # Only a Base given by its branch name can have moved on. Its name is how it was given.
     branch = test.base.name.strip()
-    if branch and not GITHUB_SHA.match(branch) and not branch.startswith('@'):
+    if check_base and branch and not GITHUB_SHA.match(branch) and not branch.startswith('@'):
         try:
             head = github.commit(test.base_repo, test.base_engine, branch)['sha']
             if head != test.base.sha and (moved := github.compare(test.base_repo, test.base_engine, test.base.sha, head)['ahead_by']) > 0:

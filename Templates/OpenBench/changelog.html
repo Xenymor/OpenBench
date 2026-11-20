@@ -1,0 +1,60 @@
+{% extends "OpenBench/base.html" %}
+
+{% load mytags %}
+{% load static %}
+
+{% block title %}Changelog{% endblock %}
+
+{% block scripts %}
+    <script src="{% static 'workload_utils.js' %}?{{ static_version }}"></script>
+{% endblock %}
+
+{% block content %}
+
+    <form method="GET" action="/changelog/">
+        <div class="form w-100">
+            <div class="col">
+                <div class="row">
+                    <label for="engine"> Engine </label>
+                    <select id="engine" name="engine">
+                        {% for engine in engines %}<option value="{{ engine }}" {% if engine == form.engine %}selected{% endif %}>{{ engine }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div class="row"><label for="base"> Base </label> <input id="base" name="base" value="{{ form.base }}"></div>
+            </div>
+            <div class="col">
+                <div class="row"><label for="since"> Since </label> <input id="since" name="since" value="{{ form.since }}" placeholder="YYYY-MM-DD, or a tag like v3.0 (30 days ago)"></div>
+                <div class="row"><label for="until"> Until </label> <input id="until" name="until" value="{{ form.until }}" placeholder="YYYY-MM-DD (today)"></div>
+            </div>
+        </div>
+        <input type="submit" class="anchorbutton btn-blue w-100" value="Show Changelog">
+    </form>
+
+    <h3 class="mt-3" style="white-space: normal;">
+        Passed SPRTs against {{ form.base }} since {{ since|date:"Y-m-d" }}:
+        {{ gainers|length }} gainer{{ gainers|length|pluralize }}, {{ simplifications|length }} simplification{{ simplifications|length|pluralize }}
+        {% if gainers %} &middot; {{ total|floatformat:2 }} Elo summed, which overstates the real gain{% endif %}
+    </h3>
+
+
+    {% if gainers or simplifications %}
+
+        <table class="hoverable">
+            <tr class="table-header"><th>Finished</th><th>Branch</th><th>Elo</th><th>Time</th><th>Bounds</th><th>Tags</th><th>Notes</th></tr>
+            {% for row in gainers %}{% include "OpenBench/Blocks/changelogrow.html" %}{% endfor %}
+            {% if simplifications %}
+                <tr class="table-header"><th colspan="7">Simplifications</th></tr>
+                {% for row in simplifications %}{% include "OpenBench/Blocks/changelogrow.html" %}{% endfor %}
+            {% endif %}
+        </table>
+
+        <div class="anchor-container mt-3">
+            <a class="anchorbutton btn-blue" onclick="copy_text_from_element('changelog-text', false)">Copy as Markdown</a>
+        </div>
+        <pre id="changelog-text" class="long-statblock" style="white-space: pre-wrap;">{{ text }}</pre>
+
+    {% else %}
+        <p>No SPRT passed in that time.</p>
+    {% endif %}
+
+{% endblock %}

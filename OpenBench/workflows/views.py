@@ -26,6 +26,7 @@
 #   /workflow/<id>/state/           The same as JSON, polled by the page
 #   /workflow/<id>/edit/            The editor for a running Workflow, which POSTs the graph as JSON
 #   /workflow/<id>/<action>/        POST: pause, resume, abort, retry, resolve
+#   /workflow/templates/...         Templates, which pushes start, see the end of this module
 
 import json
 import traceback
@@ -39,7 +40,8 @@ import OpenBench.stats
 import OpenBench.views
 
 from OpenBench.config import OPENBENCH_CONFIG
-from OpenBench.models import Book, EngineConfig, Network, Profile, Workflow, WorkflowNode
+from OpenBench import automation
+from OpenBench.models import Book, EngineConfig, Network, Profile, PushEvent, Workflow, WorkflowNode, WorkflowTemplate
 from OpenBench.templatetags.mytags import workload_url
 from OpenBench import error_watch
 from OpenBench.workflows import eta
@@ -306,3 +308,123 @@ def test_state(test):
         state['errors'] = error_watch.summary({ 'crashes' : test.crashes, 'timelosses' : test.timelosses, 'illegals' : test.illegals })
 
     return state
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+#                                 TEMPLATES                                   #
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+#   /workflow/templates/                    List of all Templates, and how to set up the webhook
+#   /workflow/templates/new/[?from=<id>]    The editor, starting from a Workflow or a Template
+#   /workflow/templates/<name>/edit/        The editor for a Template
+#   /workflow/templates/<name>/<action>/    POST: start (for a branch), toggle, delete
+
+def can_change_template(request, template):
+    profile = enabled_profile(request)
+    return bool(profile and (profile.approver or template.author == request.user.username))
+
+def templates(request):
+
+    rows = [{ 'template' : template, 'repo' : automation.template_repo(template.graph),
+              'can_change' : can_change_template(request, template) }
+            for template in WorkflowTemplate.objects.order_by('name')]
+
+    data = {
+        'rows'    : rows,
+        'pushes'  : PushEvent.objects.order_by('-id')[:20],
+        'webhook' : bool(automation.read_secret()),
+    }
+
+    return OpenBench.views.render(request, 'workflow_templates.html', data)
+
+def new_template(request):
+
+    if not enabled_profile(request):
+        return OpenBench.views.redirect(request, '/login/', error='Only enabled users can create Templates')
+
+    if request.method == 'POST':
+        return save_template(request, None)
+
+    graph, name = None, ''
+    source = request.GET.get('from', '')
+
+    if source.isdigit() and (workflow := Workflow.objects.filter(id=int(source)).first()):
+        graph, name = automation.unresolve(workflow.graph), ''
+
+    elif source and (template := WorkflowTemplate.objects.filter(name=source).first()):
+        graph, name = template.graph, 'copy-of-%s' % (template.name)
+
+    edit = { 'submit_url' : '/workflow/templates/new/', 'submit_text' : 'Create Template', 'locked' : [], 'state' : None, 'template' : True }
+    return render_editor(request, graph, name, edit)
+
+def save_template(request, template):
+
+    if not (body := parse_body(request)):
+        return JsonResponse({ 'errors' : ['Malformed request'] }, status=400)
+
+    name, graph = body
+    name = str(name or '').strip()
+
+    if errors := automation.verify_template(name, graph):
+        return JsonResponse({ 'errors' : errors }, status=400)
+
+    taken = WorkflowTemplate.objects.filter(name__iexact=name)
+    if template:
+        taken = taken.exclude(id=template.id)
+
+    if taken.exists():
+        return JsonResponse({ 'errors' : ['A Template named %s already exists' % (name)] }, status=400)
+
+    if template:
+        template.name, template.graph = name, graph
+        template.save()
+    else:
+        template = WorkflowTemplate.objects.create(name=name, graph=graph, author=request.user.username)
+
+    return JsonResponse({ 'redirect' : '/workflow/templates/' })
+
+def template(request, name, action):
+
+    if not (found := WorkflowTemplate.objects.filter(name=name).first()):
+        if request.method == 'POST' and action == 'edit':
+            return JsonResponse({ 'errors' : ['This Template no longer exists'] }, status=404)
+        return OpenBench.views.redirect(request, '/workflow/templates/', error='No such Template exists')
+
+    if not can_change_template(request, found):
+        if request.method == 'POST' and action == 'edit':
+            return JsonResponse({ 'errors' : ['You cannot change another user\'s Template'] }, status=403)
+        return OpenBench.views.redirect(request, '/workflow/templates/', error='You cannot change another user\'s Template')
+
+    if action == 'edit':
+
+        if request.method == 'POST':
+            return save_template(request, found)
+
+        edit = { 'submit_url' : '/workflow/templates/%s/edit/' % (found.name), 'submit_text' : 'Save Template',
+                 'locked' : [], 'state' : None, 'template' : True }
+        return render_editor(request, found.graph, found.name, edit)
+
+    if request.method != 'POST':
+        return OpenBench.views.redirect(request, '/workflow/templates/')
+
+    if action == 'toggle':
+        found.enabled = not found.enabled
+        found.save()
+        return OpenBench.views.redirect(request, '/workflow/templates/', status='%s was %s' % (found.name, 'enabled' if found.enabled else 'disabled'))
+
+    if action == 'delete':
+        found.delete()
+        return OpenBench.views.redirect(request, '/workflow/templates/', status='Deleted Template %s' % (found.name))
+
+    if action == 'start':
+
+        branch = request.POST.get('branch', '').strip()
+        if not Graph.BRANCH_PATTERN.match(branch) or branch.startswith('@'):
+            return OpenBench.views.redirect(request, '/workflow/templates/', error='Give the branch to start the Template for')
+
+        workflow, errors = automation.start_template(found, branch)
+        if errors:
+            return OpenBench.views.redirect(request, '/workflow/templates/', error='\n'.join(errors))
+
+        return OpenBench.views.redirect(request, '/workflow/%d/' % (workflow.id), status='Started from Template %s' % (found.name))
+
+    return OpenBench.views.redirect(request, '/workflow/templates/', error='Unknown Template action')

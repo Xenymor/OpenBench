@@ -477,7 +477,7 @@ def fake_github(errors, request, field):
     return ('https://api.github.com/repos/x/y/zipball/' + sha, branch, sha, bench, 'Commit of ' + branch)
 
 @mock.patch('OpenBench.workloads.verify_workload.collect_github_info', fake_github)
-@mock.patch('OpenBench.workloads.create_workload.run_checks', lambda workload: {})
+@mock.patch('OpenBench.workloads.create_workload.run_checks', lambda workload, check_base=False: {})
 @mock.patch('OpenBench.workflows.runner.lookup_commit', fake_commit)
 class RunnerTests(TestCase):
 

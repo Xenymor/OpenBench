@@ -1,0 +1,227 @@
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+#                                                                             #
+#   OpenBench is a chess engine testing framework authored by Andrew Grant.   #
+#   <https://github.com/AndyGrant/OpenBench>           <andrew@grantnet.us>   #
+#                                                                             #
+#   OpenBench is free software: you can redistribute it and/or modify         #
+#   it under the terms of the GNU General Public License as published by      #
+#   the Free Software Foundation, either version 3 of the License, or         #
+#   (at your option) any later version.                                       #
+#                                                                             #
+#   OpenBench is distributed in the hope that it will be useful,              #
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of            #
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the             #
+#   GNU General Public License for more details.                              #
+#                                                                             #
+#   You should have received a copy of the GNU General Public License         #
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.     #
+#                                                                             #
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+# Push-to-Test: Workflows that start themselves when a branch is pushed.
+#
+# A WorkflowTemplate is a Workflow graph in which '$branch' stands for the pushed branch.
+# A commit message that names a Template starts it for the branch it was pushed to:
+#
+#   [ob]           the Template named 'default'
+#   [ob:ltc]       the Template named 'ltc'
+#
+# Only the message of the newest commit of a push counts, so that rebasing a branch
+# with an old marker in it starts nothing. Github announces pushes through a webhook:
+#
+#   Payload URL    https://<your site>/api/github/push/
+#   Content type   application/json
+#   Secret         the first line of Config/credentials.webhook, which is never committed
+#   Events         Just the push event
+#
+# The webhook only records the push as a PushEvent, so that Github gets its answer at once.
+# The WorkflowWatcher processes them, see process_pushes(): it starts the Templates, and
+# asks the Ladders of the pushed branch to look at it, see OpenBench/ladder.py.
+
+import copy
+import hashlib
+import hmac
+import json
+import os
+import re
+import traceback
+
+from django.contrib.auth.models import User
+
+from OpenBench import github
+from OpenBench import ladder
+from OpenBench.models import PushEvent, WorkflowTemplate
+from OpenBench.workflows import notifications
+from OpenSite.settings import PROJECT_PATH
+
+SECRET_FILE    = os.path.join(PROJECT_PATH, 'Config', 'credentials.webhook')
+MARKER_PATTERN = re.compile(r'\[ob(?::([A-Za-z0-9_.-]{1,64}))?\]', re.IGNORECASE)
+NAME_PATTERN   = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
+PLACEHOLDER    = '$branch'
+DEFAULT_NAME   = 'default'
+
+def read_secret(path=None):
+    try:
+        with open(path or SECRET_FILE) as fin:
+            return fin.readline().strip() or None
+    except OSError:
+        return None
+
+def verify_signature(secret, body, signature):
+    expected = 'sha256=' + hmac.new(secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature or '')
+
+def markers(message):
+    # Names of the Templates that a commit message asks for, in order, without repeats
+    names = [(name or DEFAULT_NAME).lower() for name in MARKER_PATTERN.findall(message or '')]
+    return list(dict.fromkeys(names))
+
+def receive(headers, body):
+
+    # (status, answer) for a request of Github's webhook. Never raises.
+    if not (secret := read_secret()):
+        return 404, { 'error' : 'Webhooks are not set up on this server' }
+
+    if not verify_signature(secret, body, headers.get('X-Hub-Signature-256', '')):
+        return 403, { 'error' : 'Bad signature' }
+
+    event = headers.get('X-GitHub-Event', '')
+    if event == 'ping':
+        return 200, { 'pong' : True }
+
+    if event != 'push':
+        return 200, { 'ignored' : event }
+
+    try: data = json.loads(body)
+    except ValueError:
+        return 400, { 'error' : 'Malformed payload' }
+
+    ref = str(data.get('ref', ''))
+    if not ref.startswith('refs/heads/') or data.get('deleted') or not data.get('head_commit'):
+        return 200, { 'ignored' : ref }
+
+    repo     = github.normalize_repo((data.get('repository') or {}).get('html_url', ''))
+    delivery = str(headers.get('X-GitHub-Delivery', '') or data.get('after', ''))[:64]
+
+    if not repo:
+        return 400, { 'error' : 'Unknown repository' }
+
+    _, created = PushEvent.objects.get_or_create(delivery=delivery, defaults={
+        'repo'    : repo,
+        'branch'  : ref[len('refs/heads/'):][:256],
+        'sha'     : str(data.get('after', ''))[:64],
+        'message' : str(data['head_commit'].get('message', ''))[:20000],
+    })
+
+    return 202, { 'queued' : created }
+
+def substitute(value, branch):
+
+    # '$branch' replaced in every string of the graph's Nodes, but never in their keys
+    if isinstance(value, str):
+        return value.replace(PLACEHOLDER, branch)
+    if isinstance(value, dict):
+        return { key : substitute(item, branch) for key, item in value.items() }
+    if isinstance(value, list):
+        return [substitute(item, branch) for item in value]
+    return value
+
+def instantiate(template, branch):
+    graph = copy.deepcopy(template.graph)
+    graph['nodes'] = substitute(graph.get('nodes', {}), branch)
+    return graph
+
+def template_repo(graph):
+    return github.normalize_repo((graph.get('defaults') or {}).get('dev_repo', ''))
+
+def start_template(template, branch):
+
+    # (Workflow, None) or (None, errors). Imported late, since the runner pulls in the views.
+    from OpenBench.workflows import runner
+
+    if not (user := User.objects.filter(username=template.author).first()):
+        return None, ['The author of Template %s no longer exists' % (template.name)]
+
+    name = ('%s: %s' % (template.name, branch))[:128]
+    return runner.create_workflow(user, name, instantiate(template, branch))
+
+def handle(event):
+
+    # What happened for one push, as a short text for PushEvent.result
+    results = []
+
+    # Ladders of the branch measure the push, whatever its message
+    ladder.request_poll(event.repo, event.branch)
+
+    for name in markers(event.message):
+
+        template = WorkflowTemplate.objects.filter(name__iexact=name, enabled=True).first()
+
+        if not template:
+            results.append('No enabled Template "%s"' % (name))
+            notifications.announce('attention', 'Push of %s asked for an unknown Template' % (event.branch),
+                                   ['No enabled Template is named "%s"' % (name)], '/workflow/templates/')
+            continue
+
+        if template_repo(template.graph) != github.normalize_repo(event.repo):
+            results.append('Template %s is for another repository' % (template.name))
+            continue
+
+        workflow, errors = start_template(template, event.branch)
+
+        if errors:
+            results.append('Template %s failed: %s' % (template.name, '; '.join(errors)))
+            notifications.announce('attention', 'Push of %s could not start Template %s' % (event.branch, template.name),
+                                   errors[:10], '/workflow/templates/')
+
+        else:
+            results.append('Started Workflow #%d' % (workflow.id))
+            notifications.announce('done', 'Push of %s started Workflow #%d' % (event.branch, workflow.id),
+                                   ['%s, from Template %s' % (workflow.name, template.name)], '/workflow/%d/' % (workflow.id))
+
+    return '; '.join(results) or 'No markers'
+
+def process_pushes(limit=20):
+
+    # Called by the WorkflowWatcher. Each push is marked first, so that a broken one is never retried forever
+    for event in list(PushEvent.objects.filter(processed=False).order_by('id')[:limit]):
+
+        if not PushEvent.objects.filter(id=event.id, processed=False).update(processed=True):
+            continue # Taken by another process
+
+        try: result = handle(event)
+        except Exception as error:
+            traceback.print_exc()
+            result = 'Unexpected error: %s' % (error)
+
+        PushEvent.objects.filter(id=event.id).update(result=result[:1024])
+
+def verify_template(name, graph):
+
+    # Errors of a Template that is about to be saved. Its engines are only known once a
+    # branch is pushed, so only the structure and the settings are verified, as for a Workflow.
+    from OpenBench.workflows import graph as Graph
+    from OpenBench.workflows import runner
+
+    if not NAME_PATTERN.match(str(name or '')):
+        return ['Template names are 1-64 of [A-Za-z0-9_.-], as used in markers like [ob:name]']
+
+    if errors := Graph.validate(graph):
+        return errors
+
+    if any(node.get('config', {}).get('existing_test') for node in graph['nodes'].values()):
+        return ['Templates cannot attach existing Tests, since they run again for every push']
+
+    if not template_repo(graph):
+        return ['The defaults need the Dev Source, which pushes are matched against']
+
+    return runner.verify_settings(graph)
+
+def unresolve(graph):
+
+    # A Workflow's graph as the start of a Template: the same, without attached Tests,
+    # which each push would otherwise share. Its branches still have to become '$branch'.
+    graph = copy.deepcopy(graph)
+    for node in graph.get('nodes', {}).values():
+        node.get('config', {}).pop('existing_test', None)
+    return graph

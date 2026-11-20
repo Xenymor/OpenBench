@@ -114,7 +114,7 @@ def create_workload(request, workload_type):
 
     return OpenBench.views.redirect(request, '/index/', warning=warning)
 
-def finalize_workload(workload, user):
+def finalize_workload(workload, user, check_base=False):
 
     # Shared with Workflows, which create their Tests without a web request
     profile = Profile.objects.get(user=user)
@@ -126,7 +126,7 @@ def finalize_workload(workload, user):
 
     # Warnings about the engines, see OpenBench/workloads/checks.py
     if workload.test_mode in ['SPRT', 'GAMES']:
-        workload.checks = run_checks(workload)
+        workload.checks = run_checks(workload, check_base)
         workload.save(update_fields=['checks'])
 
 def apply_sprt_bounds(test, bounds):

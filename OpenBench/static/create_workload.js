@@ -276,6 +276,8 @@ function setup_bench_autofill() {
         });
 
         // Clearing the Bench by hand asks for it to be filled in again
+        bench?.addEventListener('input', check_same_bench);
+
         bench?.addEventListener('change', function () {
             if (this.value.trim()) return;
             this.value = 'Autofill';
@@ -370,8 +372,53 @@ function autofill_bench(target) {
 
             state.filled = bench.value;
             if (sha) sha.value = data.sha;
+            check_same_bench();
         })
         .catch(() => {}); // The server still autofills it when the form is sent
+}
+
+// Non-regression bounds, offered when Dev and Base share their Bench, see OpenBench/workloads/checks.py
+const SAME_BENCH_BOUNDS = '[-3.00, 1.00]';
+
+function check_same_bench() {
+
+    // A Dev with the Bench of its Base very likely changes nothing functional, and only has
+    // to show that it loses nothing. The server keeps the same warning on the Test's page.
+    const fields = ['engine', 'bench', 'options', 'network', 'branch'].map(field => [
+        document.getElementById('dev_' + field), document.getElementById('base_' + field)]);
+
+    if (fields.some(([dev, base]) => !dev || !base) || !document.getElementById('test_bounds'))
+        return;
+
+    const [engine, bench, options, network, branch] = fields.map(([dev, base]) => [dev.value.trim(), base.value.trim()]);
+    const same = engine[0] == engine[1] && /^[0-9]+$/.test(bench[0]) && bench[0] == bench[1]
+              && options[0] == options[1] && network[0] == network[1] && branch[0] && branch[0] != branch[1];
+
+    let warning = document.getElementById('same-bench-warning');
+
+    if (!same) {
+        if (warning) warning.hidden = true;
+        return;
+    }
+
+    if (!warning) {
+        warning = document.createElement('div');
+        warning.id = 'same-bench-warning';
+        warning.className = 'warning-message';
+
+        const text = document.createElement('span');
+        text.textContent = 'Dev and Base have the same Bench, so the change is probably not functional. ';
+
+        const button = document.createElement('a');
+        button.className   = 'anchorbutton btn-yellow';
+        button.textContent = 'Use non-regression bounds ' + SAME_BENCH_BOUNDS;
+        button.onclick     = () => { document.getElementById('test_bounds').value = SAME_BENCH_BOUNDS; warning.hidden = true; };
+
+        warning.append(text, button);
+        document.querySelector('form').prepend(warning);
+    }
+
+    warning.hidden = document.getElementById('test_bounds').value == SAME_BENCH_BOUNDS;
 }
 
 function set_test_type() {

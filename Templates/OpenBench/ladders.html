@@ -1,0 +1,101 @@
+{% extends "OpenBench/base.html" %}
+
+{% load static %}
+
+{% block title %}Ladders{% endblock %}
+
+{% block scripts %}
+    <link rel="stylesheet" href="{% static 'workflow.css' %}?{{ static_version }}">
+{% endblock %}
+
+{% block content %}
+
+    <div class="wf-toolbar">
+        <h3 style="margin: 0; flex: 1;">Ladders</h3>
+    </div>
+
+    <p class="wf-help">
+        A Ladder plays every new commit of a branch against one fixed anchor commit, for a fixed number of games.
+        So its line shows whether the patches that passed their SPRTs one by one also add up. It looks at its
+        branch every few hours, on every push that Github announces, and after every MERGE Node into the branch.
+    </p>
+
+    <table class="hoverable">
+        <tr class="table-header">
+            <th>Id</th><th>Name</th><th>Engine</th><th>Branch</th><th>Anchor</th><th>Points</th><th>Latest</th><th>Status</th>
+        </tr>
+        {% for row in rows %}
+            <tr>
+                <td><a href="/ladder/{{ row.ladder.id }}/">#{{ row.ladder.id }}</a></td>
+                <td><a href="/ladder/{{ row.ladder.id }}/">{{ row.ladder.name }}</a></td>
+                <td>{{ row.ladder.engine }}</td>
+                <td>{{ row.ladder.branch }}</td>
+                <td title="{{ row.ladder.anchor_label }}">{{ row.ladder.anchor_sha|slice:":8" }}</td>
+                <td>{{ row.count }}</td>
+                <td>{% if row.latest %}{{ row.latest.elo|floatformat:2 }} at {{ row.latest.sha|slice:":8" }}{% else %}-{% endif %}</td>
+                <td>{% if row.ladder.enabled %}Active{% else %}Paused{% endif %}</td>
+            </tr>
+        {% empty %}
+            <tr><td colspan="8">No Ladders yet</td></tr>
+        {% endfor %}
+    </table>
+
+    {% if profile.enabled %}
+
+        <h3 class="mt-3">Create a Ladder</h3>
+
+        <form method="POST" action="/ladders/">
+            {% csrf_token %}
+            <div class="form w-100">
+                <div class="col">
+                    <div class="row"><label for="name"> Name </label> <input id="name" name="name" placeholder="e.g. Fispur main"></div>
+                    <div class="row">
+                        <label for="engine"> Engine </label>
+                        <select id="engine" name="engine">
+                            {% for engine in engines %}
+                                <option value="{{ engine.name }}" {% if engine.name == default %}selected{% endif %}>{{ engine.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="row"><label for="repo"> Source </label> <input id="repo" name="repo" placeholder="The Engine's source"></div>
+                    <div class="row"><label for="branch"> Branch </label> <input id="branch" name="branch" value="main"></div>
+                    <div class="row"><label for="anchor"> Anchor </label> <input id="anchor" name="anchor" placeholder="The branch's head, or a branch, tag or sha"></div>
+                    <div class="row"><label for="anchor_bench"> Anchor Bench </label> <input id="anchor_bench" name="anchor_bench" placeholder="Autofill"></div>
+                </div>
+                <div class="col">
+                    <div class="row"><label for="games"> Games </label> <input id="games" name="games" value="2000"></div>
+                    <div class="row"><label for="time_control"> Time </label> <input id="time_control" name="time_control" placeholder="From the default preset"></div>
+                    <div class="row"><label for="options"> Options </label> <input id="options" name="options" placeholder="From the default preset"></div>
+                    <div class="row">
+                        <label for="book_name"> Book </label>
+                        <select id="book_name" name="book_name">
+                            <option value="">From the default preset</option>
+                            {% for book in books %}<option value="{{ book.name }}">{{ book.name }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div class="row">
+                        <label for="network"> Network </label>
+                        <select id="network" name="network">
+                            <option value="">None</option>
+                            {% for network in networks %}<option value="{{ network.sha256 }}">{{ network.engine }}: {{ network.name }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div class="row"><label for="priority"> Priority </label> <input id="priority" name="priority" placeholder="From the default preset"></div>
+                    <div class="row"><label for="throughput"> Throughput </label> <input id="throughput" name="throughput" placeholder="From the default preset"></div>
+                    <div class="row"><label for="poll_hours"> Poll Hours </label> <input id="poll_hours" name="poll_hours" value="6"></div>
+                    <div class="row">
+                        <label for="notify"> Discord </label>
+                        <select id="notify" name="notify">
+                            <option value="all">Every result</option>
+                            <option value="attention">Only problems</option>
+                            <option value="off">Off</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <input type="submit" class="anchorbutton btn-blue w-100" value="Create Ladder">
+        </form>
+
+    {% endif %}
+
+{% endblock %}

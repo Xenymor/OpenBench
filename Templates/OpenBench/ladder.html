@@ -1,0 +1,86 @@
+{% extends "OpenBench/base.html" %}
+
+{% load static %}
+
+{% block title %}{{ ladder.name }}{% endblock %}
+
+{% block scripts %}
+
+    {{ points|json_script:"json-points" }}
+
+    <link rel="stylesheet" href="{% static 'workflow.css' %}?{{ static_version }}">
+    <script src="{% static 'charts.js' %}?{{ static_version }}"></script>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+
+            const points = JSON.parse(document.getElementById('json-points').textContent).filter(point => 'elo' in point);
+            const time   = point => new Date(point.created).getTime();
+            const label  = point => point.sha.slice(0, 8) + ' ' + point.label + ': ' + point.elo.toFixed(2)
+                                  + ' ± ' + ((point.upper - point.lower) / 2).toFixed(2) + ' Elo, ' + point.games + ' games'
+                                  + (point.finished ? '' : ' (running)');
+
+            ob_chart(document.getElementById('ladder-chart'), {
+                series   : [{ name : 'Elo against the anchor', width : 2, dots : true,
+                              points : points.map(point => [time(point), point.elo]),
+                              errors : points.map(point => [point.lower, point.upper]),
+                              labels : points.map(label) }],
+                x_format : x => new Date(x).toLocaleDateString(),
+                y_label  : 'Elo against the anchor',
+                zero     : true,
+                empty    : 'No commit has been measured yet',
+            });
+        });
+    </script>
+{% endblock %}
+
+{% block content %}
+
+    <div class="wf-toolbar">
+        <h3 style="margin: 0; flex: 1; white-space: normal;">
+            #{{ ladder.id }} {{ ladder.name }} &middot; {{ ladder.engine }} {{ ladder.branch }}
+            &middot; {% if ladder.enabled %}Active{% else %}Paused{% endif %}
+        </h3>
+
+        {% if can_change %}
+            <form method="POST" action="/ladder/{{ ladder.id }}/measure/">
+                {% csrf_token %}
+                <button class="anchorbutton btn-preset" type="submit" title="Measure the head of the branch now">Measure now</button>
+            </form>
+            <form method="POST" action="/ladder/{{ ladder.id }}/toggle/">
+                {% csrf_token %}
+                <button class="anchorbutton btn-yellow" type="submit">{% if ladder.enabled %}Pause{% else %}Resume{% endif %}</button>
+            </form>
+            <form method="POST" action="/ladder/{{ ladder.id }}/delete/" onsubmit="return confirm('Delete this Ladder? Its Tests stay.');">
+                {% csrf_token %}
+                <button class="anchorbutton btn-red" type="submit" title="Delete the Ladder"><i class="fa-solid fa-trash"></i></button>
+            </form>
+        {% endif %}
+    </div>
+
+    <table class="test-config left-align wrappable">
+        <tr><td class="td-label">Source</td><td><a href="{{ ladder.repo }}">{{ ladder.repo }}</a></td></tr>
+        <tr><td class="td-label">Anchor</td><td><a href="{{ ladder.repo }}/commit/{{ ladder.anchor_sha }}" title="{{ ladder.anchor_sha }}">{{ ladder.anchor_sha|slice:":12" }}</a> {{ ladder.anchor_label }}, Bench {{ ladder.anchor_bench }}</td></tr>
+        <tr><td class="td-label">Games</td><td>{{ ladder.settings.games }} per commit</td></tr>
+        <tr><td class="td-label">Polls</td><td>every {{ ladder.poll_hours }} hours, and on pushes</td></tr>
+    </table>
+
+    <div id="ladder-chart" class="w-100 mt-3"></div>
+
+    <table class="hoverable mt-3">
+        <tr class="table-header"><th>Measured</th><th>Commit</th><th>Message</th><th>Elo</th><th>Games</th><th>Test</th></tr>
+        {% for point in points reversed %}
+            <tr>
+                <td>{{ point.created|slice:":16" }}</td>
+                <td><a href="{{ ladder.repo }}/commit/{{ point.sha }}">{{ point.sha|slice:":8" }}</a></td>
+                <td>{{ point.label }}</td>
+                <td>{% if 'elo' in point %}{{ point.elo|floatformat:2 }} [{{ point.lower|floatformat:2 }}, {{ point.upper|floatformat:2 }}]{% elif point.error %}<span style="color: #FA9696; white-space: normal;">{{ point.error|truncatechars:120 }}</span>{% else %}-{% endif %}</td>
+                <td>{% if 'elo' in point %}{{ point.games }} / {{ point.max_games }}{% endif %}</td>
+                <td>{% if point.test %}<a href="/test/{{ point.test }}/">#{{ point.test }}</a>{% endif %}</td>
+            </tr>
+        {% empty %}
+            <tr><td colspan="6">Nothing measured yet</td></tr>
+        {% endfor %}
+    </table>
+
+{% endblock %}

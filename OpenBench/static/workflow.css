@@ -116,6 +116,8 @@
 #content .wf-kind-SPSA .wf-node-head { background-color: #3D2C4F; }
 #content .wf-kind-JOIN .wf-node-head { background-color: #2F3B2F; }
 #content .wf-kind-IF   .wf-node-head { background-color: #4A3F1C; }
+#content .wf-kind-MERGE  .wf-node-head { background-color: #1F4440; }
+#content .wf-kind-COMMIT .wf-node-head { background-color: #44301F; }
 
 #content .wf-node-label {
     font-weight: bold;
@@ -152,6 +154,20 @@
 #content .wf-node-detail {
     margin-top: 4px;
     color: var(--color-font2);
+}
+
+#content .wf-node-eta {
+    color: #8BBAD6;
+}
+
+#content .wf-node-warning {
+    margin-top: 4px;
+    color: #EFF891;
+}
+
+#content .wf-finish {
+    color: var(--color-font2);
+    font-weight: normal;
 }
 
 #content .wf-node-error {

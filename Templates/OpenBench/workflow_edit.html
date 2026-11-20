@@ -48,13 +48,15 @@
     <div class="error-message" id="wf-errors" style="white-space: pre-wrap;" hidden></div>
 
     <div class="wf-toolbar">
-        <input id="wf-name" placeholder="Workflow name" value="{{ clone_name }}" maxlength="128">
+        <input id="wf-name" placeholder="{% if edit.template %}Template name, as in [ob:name]{% else %}Workflow name{% endif %}" value="{{ clone_name }}" maxlength="{% if edit.template %}64{% else %}128{% endif %}">
         <button class="anchorbutton btn-blue" id="wf-add-SPRT"><i class="fa-solid fa-plus"></i> SPRT</button>
         <button class="anchorbutton btn-blue" id="wf-add-SPSA"><i class="fa-solid fa-plus"></i> SPSA</button>
         <button class="anchorbutton btn-blue" id="wf-add-JOIN"><i class="fa-solid fa-plus"></i> JOIN</button>
         <button class="anchorbutton btn-blue" id="wf-add-IF"><i class="fa-solid fa-plus"></i> IF</button>
+        <button class="anchorbutton btn-blue" id="wf-add-MERGE" title="Merge a tested engine, or open a pull request"><i class="fa-solid fa-plus"></i> MERGE</button>
+        <button class="anchorbutton btn-blue" id="wf-add-COMMIT" title="Commit the values an SPSA tuned"><i class="fa-solid fa-plus"></i> COMMIT</button>
         <button class="anchorbutton btn-blue" id="wf-paste" title="Ctrl+V"><i class="fa-solid fa-paste"></i> Paste</button>
-        {% if not edit.state %}
+        {% if not edit.state and not edit.template %}
             <button class="anchorbutton btn-yellow" id="wf-example">Example</button>
         {% endif %}
         <button class="anchorbutton btn-preset" id="wf-submit">{{ edit.submit_text }}</button>

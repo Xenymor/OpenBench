@@ -212,3 +212,60 @@ async function fetch_spsa_digest(workload_id) {
     const buttonContainer = document.getElementById('spsa-digest-button-container')
     buttonContainer.style.display = 'none'
 }
+
+// The course of every parameter of a tune, drawn with charts.js. All of them together, as their
+// distance from the start in units of their C_end, or one of them in its own units.
+async function fetch_spsa_history(workload_id) {
+
+    const resp = await fetch(`/api/spsa/${workload_id}/history/`)
+    const data = await resp.json()
+    const root = document.getElementById('spsa-history-container')
+    root.innerHTML = ''
+
+    const info = document.createElement('p')
+    info.style.whiteSpace = 'normal'
+    const parts = [`${data.games.length - 1} snapshots`]
+    if (data.drift !== null)
+        parts.push(`largest drift over the last ${Math.round(100 * data.window)}% of the games: ${data.drift.toFixed(2)} C_end`)
+    if (data.auto_stop)
+        parts.push(`stops below ${data.auto_stop} C_end`)
+    if (data.converged_at !== null)
+        parts.push(`converged after ${data.converged_at} games`)
+    info.textContent = parts.join(' · ')
+    root.appendChild(info)
+
+    const select = document.createElement('select')
+    select.appendChild(new Option('All parameters, in C_end from their start', ''))
+    data.params.forEach((param, index) => select.appendChild(new Option(param.name, index)))
+    root.appendChild(select)
+
+    const chart = document.createElement('div')
+    chart.className = 'mt-1'
+    root.appendChild(chart)
+
+    function draw() {
+
+        let series, label
+
+        if (select.value === '') {
+            series = data.params.map(param => ({
+                name   : param.name,
+                width  : 1,
+                points : data.games.map((games, index) => [games,
+                    param.values[index] === null || !param.c_end ? null : (param.values[index] - param.start) / param.c_end]),
+            }))
+            label = 'Drift from the start, in C_end'
+        }
+
+        else {
+            const param = data.params[Number(select.value)]
+            series = [{ name : param.name, width : 2, points : data.games.map((games, index) => [games, param.values[index]]) }]
+            label  = `${param.name} (start ${param.start}, range ${param.min} to ${param.max})`
+        }
+
+        ob_chart(chart, { series : series, x_label : 'Games', y_label : label, zero : select.value === '' })
+    }
+
+    select.onchange = draw
+    draw()
+}

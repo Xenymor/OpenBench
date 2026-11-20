@@ -78,8 +78,11 @@ def describe(seconds):
         return '-'
 
     minutes = int(round(seconds / 60.0))
+    if minutes < 1:
+        return '<1m'
+
     if minutes < 60:
-        return '~%dm' % (max(1, minutes))
+        return '~%dm' % (minutes)
 
     hours = minutes // 60
     if hours < 48:

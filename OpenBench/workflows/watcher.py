@@ -20,6 +20,7 @@
 
 # Advances every Workflow that is not FINISHED or ABORTED, as the PGNWatcher does
 # for the PGNs: one thread, in the one process that holds the watcher lockfile.
+# It also processes the pushes that Github announced, and the Ladders that are due.
 
 import sys
 import threading
@@ -41,7 +42,16 @@ class WorkflowWatcher(threading.Thread):
 
         # Imported late, since this module is imported while the apps are still loading,
         # and the runner pulls in the workload modules, which import OpenBench.views
+        from OpenBench import automation, ladder
         from OpenBench.workflows import runner
+
+        # Pushes that Github announced, and Ladders that are due, see automation.py and ladder.py
+        for task in [automation.process_pushes, ladder.poll_all]:
+            try: task()
+            except Exception as error:
+                if 'database is locked' not in str(error).lower():
+                    traceback.print_exc()
+                    sys.stdout.flush()
 
         final   = [Workflow.Status.FINISHED, Workflow.Status.ABORTED]
         pending = Workflow.objects.exclude(status__in=final).values_list('id', flat=True)

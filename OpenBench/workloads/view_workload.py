@@ -32,9 +32,12 @@ from collections import defaultdict
 from django.db.models import BooleanField, ExpressionWrapper, F, Q
 from django.utils import timezone
 
+import OpenBench.error_watch
+import OpenBench.eta
 import OpenBench.views
 import OpenBench.stats
 from OpenBench.models import *
+from OpenBench.workloads.checks import describe as describe_checks
 from OpenBench.workloads.modify_workload import bench_corrections
 
 def view_workload(request, workload, workload_type):
@@ -56,6 +59,22 @@ def view_workload(request, workload, workload_type):
 
     # Workers stopped the Workload for a wrong Bench, which it can be restarted with
     data['bench_corrections'] = bench_corrections(workload)
+
+    # Warnings from its creation, and errors while playing, see checks.py and error_watch.py
+    data['warnings'] = describe_checks(workload.checks or {})
+    if workload.crashes or workload.timelosses or workload.illegals:
+        data['errors'] = OpenBench.error_watch.summary({ 'crashes' : workload.crashes, 'timelosses' : workload.timelosses, 'illegals' : workload.illegals })
+
+    # How long it still runs, see OpenBench/eta.py
+    if not workload.finished:
+        data['eta'] = OpenBench.eta.describe(OpenBench.eta.remaining_seconds(workload, timezone.now()))
+
+    # Earlier Workloads of the same branch, so that an idea is not tried twice unknowingly
+    data['related'] = (Test.objects.filter(dev__name=workload.dev.name, dev_engine=workload.dev_engine, deleted=False)
+                       .exclude(id=workload.id).select_related('dev', 'base').order_by('-id')[:10])
+
+    # Ladders that this Workload belongs to
+    data['ladder_point'] = workload.ladder_points.select_related('ladder').first()
 
     if workload_type == 'TEST':
         data['type']= workload_type

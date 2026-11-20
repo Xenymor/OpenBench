@@ -10,7 +10,12 @@ const WF_PORTS = {
     SPSA : ['done'],
     JOIN : ['all', 'some', 'none'],
     IF   : ['true', 'false'],
+    MERGE  : ['done'],
+    COMMIT : ['done'],
 };
+
+// Nodes that act on Github, see OpenBench/workflows/actions.py
+const WF_ACTIONS = ['MERGE', 'COMMIT'];
 
 const WF_PORT_COLORS = {
     passed : '#76D576', failed : '#FA9696', done : '#60F0FF',
@@ -34,6 +39,7 @@ const WF_FIELDS = {
         ['test_confidence', 'Confidence',     '@test_confidence'],
         ['priority',        'Priority',       '@priority'],
         ['throughput',      'Throughput',     '@throughput'],
+        ['same_bench_bounds','Same Bench Bounds','e.g. [-3.00, 1.00], if Dev and Base share a Bench'],
         ['existing_test',   'Existing Test',  'Id of a running SPRT to attach'],
     ],
     SPSA : [
@@ -51,6 +57,7 @@ const WF_FIELDS = {
         ['spsa_reporting_type',    'Reporting',    'BATCHED or BULK'],
         ['spsa_distribution_type', 'Distribution', 'SINGLE or MULTIPLE'],
         ['at_percent',             'Done at %',    '100'],
+        ['spsa_auto_stop',         'Auto-Stop',    '0, or the drift in C_end to stop below'],
         ['priority',               'Priority',     '@priority'],
         ['throughput',             'Throughput',   '@throughput'],
         ['existing_test',          'Existing Test','Id of a running SPSA to attach'],
@@ -60,7 +67,36 @@ const WF_FIELDS = {
         ['condition', 'Condition', 'failed && elo > 3'],
         ['source',    'Source',    'Key of an SPRT, empty for @trigger'],
     ],
+    MERGE : [
+        ['source', 'Source', '@trigger.dev, or a branch'],
+        ['target', 'Target', 'main'],
+        ['mode',   'Mode',   'pr, merge or ff'],
+        ['title',  'Title',  'Name of the engine, and the Workflow'],
+    ],
+    COMMIT : [
+        ['source',  'Source',  'Key of an SPSA, empty for @trigger'],
+        ['file',    'File',    'Path in the repository, e.g. src/Search.cs'],
+        ['pattern', 'Pattern', '\\b{name}\\b\\s*=\\s*(-?\\d+(?:\\.\\d+)?)'],
+        ['branch',  'Branch',  'openbench/tuned-wf<id>-<key>'],
+        ['mode',    'Mode',    'pr or commit'],
+        ['target',  'Target',  'main, for the pull request'],
+    ],
 };
+
+const WF_MERGE_HELP =
+    'Brings the engine that a Node tested into a branch, once this Node is reached: as a pull request (pr), ' +
+    'as a merge commit (merge), or by moving the branch forward to it (ff). The message carries the results ' +
+    'of the SPRTs that tested it, and its Bench. Needs a token that may push, in Config/credentials.<engine>.';
+
+const WF_COMMIT_HELP =
+    'Writes the values that an SPSA tuned into a file of the engine, on a branch that starts at the tuned commit, ' +
+    'and opens a pull request for it (pr), or only commits (commit). The pattern finds each value by the name ' +
+    'of its parameter: {name} stands for the name, and its first group is the value. The Bench changes with ' +
+    'the new values, so measure it before merging.';
+
+const WF_TEMPLATE_HELP =
+    'This is a Template: $branch stands for the branch that a push names, for example as Dev of the first SPRT. ' +
+    'A commit message with [ob:<name>] starts it, [ob] the Template named default.';
 
 const WF_SPSA_DEFAULTS = {
     spsa_iterations : '25000', spsa_pairs_per : '8', spsa_alpha : '0.602', spsa_gamma : '0.101',
@@ -235,6 +271,16 @@ function wf_node_summary(key) {
         if (named.length) lines.push('waits for ' + named.join(', '));
     }
 
+    else if (node.kind == 'MERGE') {
+        lines.push((wf_value(config, 'source') || '@trigger.dev') + ' into ' + (wf_value(config, 'target') || 'main'));
+        lines.push({ pr : 'as a pull request', merge : 'as a merge commit', ff : 'as a fast-forward' }[wf_value(config, 'mode') || 'pr'] || '?');
+    }
+
+    else if (node.kind == 'COMMIT') {
+        lines.push('Values of ' + (wf_value(config, 'source') || '@trigger') + ' into ' + (wf_value(config, 'file') || '?'));
+        lines.push((wf_value(config, 'mode') || 'pr') == 'pr' ? 'with a pull request' : 'as a commit');
+    }
+
     else if (config.existing_test)
         lines.push('Attaches Test #' + config.existing_test);
 
@@ -318,6 +364,20 @@ function wf_render_node(key) {
         if (live.detail)
             body.append(wf_el('div', 'wf-node-detail', live.detail));
 
+        for (const line of wf_eta_lines(live))
+            body.append(wf_el('div', 'wf-node-eta', line));
+
+        // One short line, since Nodes are small. The panel lists them in full
+        const warnings = (live.test && live.test.warnings) || [];
+        if (warnings.length) {
+            const line = wf_el('div', 'wf-node-warning', warnings.length == 1 ? '⚠ ' + warnings[0] : '⚠ ' + warnings.length + ' warnings');
+            line.title = warnings.join('\n');
+            body.append(line);
+        }
+
+        if (live.test && live.test.errors)
+            body.append(wf_el('div', 'wf-node-error', live.test.errors));
+
         for (const line of wf_bench_lines(live))
             body.append(wf_el('div', 'wf-node-bench', line));
 
@@ -343,6 +403,31 @@ function wf_render_node(key) {
     element.append(ports);
 
     return element;
+}
+
+function wf_time(iso) {
+    // A time ahead, as 'Thu 18:40'
+    const date = new Date(iso);
+    return date.toLocaleDateString(undefined, { weekday : 'short' }) + ' ' + date.toLocaleTimeString(undefined, { hour : '2-digit', minute : '2-digit' });
+}
+
+function wf_eta_lines(live) {
+
+    // When a Node starts or ends, at the earliest, see OpenBench/workflows/eta.py
+    const eta = live.eta;
+    if (!eta) return [];
+
+    if (live.state == 'RUNNING')
+        return eta.finish ? ['ends ~' + wf_time(eta.finish)] : [];
+
+    if (live.state == 'WAITING') {
+        const lines = [];
+        if (eta.start)  lines.push('starts ~' + wf_time(eta.start));
+        if (eta.finish && eta.finish != eta.start) lines.push('ends ~' + wf_time(eta.finish));
+        return lines;
+    }
+
+    return [];
 }
 
 function wf_port_point(key, port) {
@@ -543,6 +628,8 @@ function wf_render_panel() {
         panel.append(wf_el('p', 'wf-help', wf.editable
             ? 'Add Nodes with the buttons above. Drag a Node by its header, and drag from an output on its right onto another Node to connect them. Click a Node or an edge to edit or remove it.'
             : 'Click a Node to see its details.'));
+        if (wf.template)
+            panel.append(wf_el('p', 'wf-help', WF_TEMPLATE_HELP));
         panel.append(wf_el('p', 'wf-help', WF_COPY_HELP));
         panel.append(wf_el('p', 'wf-help', WF_REF_HELP));
         return;
@@ -638,6 +725,12 @@ function wf_render_node_editor(panel, key, node) {
     if (node.kind == 'IF')
         panel.append(wf_el('p', 'wf-help', WF_IF_HELP));
 
+    if (node.kind == 'MERGE')
+        panel.append(wf_el('p', 'wf-help', WF_MERGE_HELP));
+
+    if (node.kind == 'COMMIT')
+        panel.append(wf_el('p', 'wf-help', WF_COMMIT_HELP));
+
     wf_ref_suggestions(key);
 
     if (node.kind == 'SPRT' || node.kind == 'SPSA') {
@@ -660,7 +753,7 @@ function wf_render_node_editor(panel, key, node) {
         input.placeholder = wf_placeholder(placeholder, config, field);
 
         if (field == 'spsa_inputs') input.rows = 8;
-        if (field == 'dev' || field == 'base') input.setAttribute('list', 'wf-refs');
+        if (field == 'dev' || field == 'base' || (node.kind == 'MERGE' && field == 'source')) input.setAttribute('list', 'wf-refs');
 
         input.addEventListener('input', () => {
             config[field] = input.value;
@@ -903,7 +996,11 @@ function wf_render_node_details(panel, key, node) {
         row('Branches', 'looked up when the Node starts');
 
     row('Elo', live.test && live.test.elo);
-    row('Decided on', live.detail);
+    row(WF_ACTIONS.includes(node.kind) ? 'Result' : 'Decided on', live.detail);
+    if (live.eta && live.eta.start && live.state == 'WAITING') row('Starts', '~' + wf_time(live.eta.start));
+    if (live.eta && live.eta.finish && ['WAITING', 'RUNNING'].includes(live.state)) row('Ends', '~' + wf_time(live.eta.finish));
+    for (const warning of (live.test && live.test.warnings) || []) row('Warning', warning);
+    row('Errors', live.test && live.test.errors);
     row('Tuned', live.tuned);
     panel.append(table);
 
@@ -976,7 +1073,9 @@ function wf_add_node(kind) {
 
     const config = kind == 'SPSA' ? Object.assign({ dev : '' }, WF_SPSA_DEFAULTS)
                  : kind == 'SPRT' ? { dev : '', base : wf_default_value('base_branch') || 'main' }
-                 : kind == 'IF'   ? { condition : 'failed && elo > 3', source : '' } : {};
+                 : kind == 'IF'   ? { condition : 'failed && elo > 3', source : '' }
+                 : kind == 'MERGE'  ? { source : '@trigger.dev', target : wf_default_value('base_branch') || 'main', mode : 'pr' }
+                 : kind == 'COMMIT' ? { source : '', file : '', mode : 'pr', target : wf_default_value('base_branch') || 'main' } : {};
 
     wf.graph.nodes[key] = {
         kind   : kind,
@@ -1010,7 +1109,7 @@ function wf_rename(old_key, new_key) {
 
     for (const key in wf.graph.nodes) {
         const config = wf.graph.nodes[key].config || {};
-        for (const field of ['dev', 'base'])
+        for (const field of ['dev', 'base', 'source'])
             if (typeof config[field] == 'string')
                 config[field] = config[field].replace(new RegExp('^@' + old_key + '\\.'), '@' + new_key + '.');
 
@@ -1136,7 +1235,7 @@ function wf_free_key(key, taken) {
 function wf_remap(config, mapping) {
 
     // References between the copied Nodes point to the copies, all others stay as they were
-    for (const field of ['dev', 'base']) {
+    for (const field of ['dev', 'base', 'source']) {
         const ref = typeof config[field] == 'string' && config[field].trim().match(/^@([A-Za-z0-9_-]{1,32})\.(dev|base|tuned)$/);
         if (ref && mapping[ref[1]])
             config[field] = '@' + mapping[ref[1]] + '.' + ref[2];
@@ -1431,6 +1530,7 @@ function wf_init_editor(clone_graph, edit) {
     wf.submit_url = edit.submit_url;
     wf.locked     = new Set(edit.locked || []);
     wf.state      = edit.state;
+    wf.template   = !!edit.template;
     wf_attach(document.getElementById('wf-canvas-scroll'));
 
     if (clone_graph) {
@@ -1438,7 +1538,7 @@ function wf_init_editor(clone_graph, edit) {
         wf.graph = clone_graph;
     }
 
-    for (const kind of ['SPRT', 'SPSA', 'JOIN', 'IF'])
+    for (const kind of ['SPRT', 'SPSA', 'JOIN', 'IF', 'MERGE', 'COMMIT'])
         document.getElementById('wf-add-' + kind).onclick = () => wf_add_node(kind);
 
     const example = document.getElementById('wf-example');
@@ -1476,6 +1576,8 @@ function wf_submit() {
     })
     .then(response => response.json())
     .then(data => {
+        if (data.redirect)
+            return window.location.href = data.redirect;
         if (data.id)
             return window.location.href = '/workflow/' + data.id + '/';
         errors.textContent = (data.errors || ['Unknown error']).join('\n');
@@ -1501,6 +1603,7 @@ function wf_init_view(workflow_id, graph, state, can_modify) {
 
     wf_render();
     wf_render_panel();
+    wf_show_finish(state.finish);
 
     // Follow the progress, until there is nothing left to happen
     const timer = setInterval(() => {
@@ -1518,7 +1621,14 @@ function wf_init_view(workflow_id, graph, state, can_modify) {
                     wf_render_panel();
                 if (changed)
                     document.getElementById('wf-status').textContent = data.status;
+                wf_show_finish(data.finish);
             })
             .catch(() => {}); // The Server may be restarting, just try again later
     }, 20000);
+}
+
+function wf_show_finish(iso) {
+    // The end of the Workflow, at the earliest, in the header of its page
+    const element = document.getElementById('wf-finish');
+    if (element) element.textContent = iso ? '· ends ~' + wf_time(iso) : '';
 }

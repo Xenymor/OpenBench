@@ -1,0 +1,107 @@
+{% extends "OpenBench/base.html" %}
+
+{% load static %}
+
+{% block title %}Workflow Templates{% endblock %}
+
+{% block scripts %}
+    <link rel="stylesheet" href="{% static 'workflow.css' %}?{{ static_version }}">
+{% endblock %}
+
+{% block content %}
+
+    <div class="wf-toolbar">
+        <h3 style="margin: 0; flex: 1;">Workflow Templates</h3>
+        <a class="anchorbutton btn-preset" href="/workflow/templates/new/"><i class="fa-solid fa-plus"></i> Create Template</a>
+    </div>
+
+    <p class="wf-help">
+        A Template is a Workflow in which <code>$branch</code> stands for a branch. Pushing a commit whose message contains
+        <code>[ob]</code> starts the Template named <code>default</code> for the pushed branch, and <code>[ob:name]</code> the
+        Template of that name. Only the newest commit of a push counts. A Template can also be started by hand, below.
+    </p>
+
+    <table class="hoverable">
+
+        <tr class="table-header">
+            <th>Name</th>
+            <th>Marker</th>
+            <th>Repository</th>
+            <th>Author</th>
+            <th>Start for a branch</th>
+            <th></th>
+        </tr>
+
+        {% for row in rows %}
+            <tr>
+                <td>
+                    {% if row.can_change %}<a href="/workflow/templates/{{ row.template.name }}/edit/">{{ row.template.name }}</a>{% else %}{{ row.template.name }}{% endif %}
+                    {% if not row.template.enabled %}<span class="wf-status wf-status-PAUSED">disabled</span>{% endif %}
+                </td>
+                <td><code>{% if row.template.name == "default" %}[ob]{% else %}[ob:{{ row.template.name }}]{% endif %}</code></td>
+                <td title="{{ row.repo }}">{{ row.repo|cut:"https://github.com/"|default:"?" }}</td>
+                <td>{{ row.template.author|capfirst }}</td>
+                <td>
+                    {% if row.can_change %}
+                        <form method="POST" action="/workflow/templates/{{ row.template.name }}/start/" class="wf-inline">
+                            {% csrf_token %}
+                            <input name="branch" placeholder="branch" style="width: 110px;">
+                            <button class="anchorbutton btn-blue" type="submit">Start</button>
+                        </form>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if row.can_change %}
+                        <a class="wf-icon-button" href="/workflow/templates/new/?from={{ row.template.name|urlencode }}" title="Copy"><i class="fa-solid fa-copy"></i></a>
+                        <form method="POST" action="/workflow/templates/{{ row.template.name }}/toggle/" class="wf-inline">
+                            {% csrf_token %}
+                            <button class="wf-icon-button" type="submit" title="{% if row.template.enabled %}Disable{% else %}Enable{% endif %}">
+                                <i class="fa-solid {% if row.template.enabled %}fa-pause{% else %}fa-play{% endif %}"></i>
+                            </button>
+                        </form>
+                        <form method="POST" action="/workflow/templates/{{ row.template.name }}/delete/" class="wf-inline"
+                              onsubmit="return confirm('Delete Template {{ row.template.name }}? Its Workflows stay.');">
+                            {% csrf_token %}
+                            <button class="wf-icon-button" type="submit" title="Delete"><i class="fa-solid fa-trash"></i></button>
+                        </form>
+                    {% endif %}
+                </td>
+            </tr>
+        {% empty %}
+            <tr><td colspan="6">No Templates yet. Create one, or save a Workflow as a Template from its page.</td></tr>
+        {% endfor %}
+
+    </table>
+
+    <h3 class="mt-3">Github Webhook</h3>
+
+    {% if webhook %}
+        <p class="wf-help">The webhook is set up on this server. Add it to the repository on Github, under Settings, Webhooks:</p>
+    {% else %}
+        <p class="wf-help">The webhook is not set up yet. Put a random secret into the first line of <code>Config/credentials.webhook</code>, then add it to the repository on Github, under Settings, Webhooks:</p>
+    {% endif %}
+
+    <table class="test-config left-align">
+        <tr><td class="td-label">Payload URL</td><td><code>https://{{ request.get_host }}/api/github/push/</code></td></tr>
+        <tr><td class="td-label">Content type</td><td><code>application/json</code></td></tr>
+        <tr><td class="td-label">Secret</td><td>The first line of <code>Config/credentials.webhook</code></td></tr>
+        <tr><td class="td-label">Events</td><td>Just the push event</td></tr>
+    </table>
+
+    <h3 class="mt-3">Recent Pushes</h3>
+
+    <table class="hoverable">
+        <tr class="table-header"><th>Received</th><th>Branch</th><th>Commit</th><th>Result</th></tr>
+        {% for push in pushes %}
+            <tr>
+                <td class="timestamp">{{ push.created|date:'U' }}</td>
+                <td>{{ push.branch }}</td>
+                <td title="{{ push.message }}">{{ push.sha|slice:":8" }}</td>
+                <td>{% if push.processed %}{{ push.result|default:"..." }}{% else %}Waiting{% endif %}</td>
+            </tr>
+        {% empty %}
+            <tr><td colspan="4">No pushes received yet</td></tr>
+        {% endfor %}
+    </table>
+
+{% endblock %}

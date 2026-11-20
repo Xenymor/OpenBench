@@ -26,6 +26,7 @@ import django.contrib.auth
 
 import OpenBench.config
 import OpenBench.model_utils
+import OpenBench.spsa_history
 import OpenBench.spsa_utils
 import OpenBench.utils
 
@@ -340,6 +341,14 @@ def search(request):
     if params.get('info-contains'):
         tests = tests.filter(info__icontains=params['info-contains'])
 
+    if params.get('notes-contains'):
+        tests = tests.filter(notes__icontains=params['notes-contains'])
+
+    # Tags of the experiment journal, kept separated by single spaces: a Test must carry every one
+    for tag in params.get('tags', '').replace(',', ' ').split():
+        tests = tests.filter(Q(tags__iexact=tag) | Q(tags__istartswith=tag + ' ')
+                             | Q(tags__iendswith=' ' + tag) | Q(tags__icontains=' ' + tag + ' '))
+
     if params.get('dev-network'):
         tests = tests.filter(dev_netname__icontains=params['dev-network'])
 
@@ -426,6 +435,8 @@ def search(request):
     form = {
         'keywords'      : params.get('keywords', ''),
         'info'          : params.get('info-contains', ''),
+        'tags'          : params.get('tags', ''),
+        'notes'         : params.get('notes-contains', ''),
         'authors'       : params.get('authors', ''),
         'dev_engine'    : params.get('dev-engine', ''),
         'base_engine'   : params.get('base-engine', ''),
@@ -1124,7 +1135,10 @@ def api_spsa(request, workload_id, query):
     if query == 'perturbation':
         return api_response({ 'perturbation' : OpenBench.spsa_utils.spsa_workload_assignment_dict(workload, 4) })
 
-    valid_endpoints = [ 'inputs', 'outputs', 'digest', 'perturbation' ]
+    if query == 'history' and workload.test_mode == 'SPSA':
+        return JsonResponse(OpenBench.spsa_history.history(workload))
+
+    valid_endpoints = [ 'inputs', 'outputs', 'digest', 'perturbation', 'history' ]
     return api_response({ 'error' : 'Valid /query/ endpoints are: [ %s ]' % (', '.join(valid_endpoints)) })
 
 @csrf_exempt

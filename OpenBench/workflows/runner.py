@@ -749,7 +749,8 @@ def create_test(workflow, nodes, node):
     test.info = ('[Workflow #%d: %s] %s' % (workflow.id, label, test.info))[:1024]
     test.save()
 
-    Create.finalize_workload(test, user)
+    # A Base pinned when the Workflow was saved may have newer commits by now
+    Create.finalize_workload(test, user, check_base='base' in (node.pinned or {}))
     return test
 
 def compute_status(workflow, nodes):

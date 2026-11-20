@@ -124,7 +124,8 @@ class ChecksTests(SimpleTestCase):
 
         with mock.patch.object(checks.github, 'compare', lambda repo, engine, base, head: compares[(base, head)]), \
              mock.patch.object(checks.github, 'commit', lambda repo, engine, ref: { 'sha' : 'c' * 40, 'message' : '', 'date' : '' }):
-            found = checks.run_checks(self.engines())
+            found = checks.run_checks(self.engines(), check_base=True)
+            self.assertEqual(checks.run_checks(self.engines()), { 'same_bench' : True, 'behind' : 2 }) # The form's Base is current
 
         self.assertEqual(found, { 'same_bench' : True, 'behind' : 2, 'base_moved' : 4, 'base_branch' : 'main' })
         self.assertEqual(checks.describe(found), [
@@ -139,7 +140,7 @@ class ChecksTests(SimpleTestCase):
 
         with mock.patch.object(checks.github, 'compare', broken), mock.patch.object(checks.github, 'commit', broken), \
              mock.patch.object(checks.traceback, 'print_exc', lambda: None):
-            self.assertEqual(checks.run_checks(self.engines(base_bench=5)), {})
+            self.assertEqual(checks.run_checks(self.engines(base_bench=5), check_base=True), {})
 
     def test_other_engines_and_modes_are_not_compared(self):
         with mock.patch.object(checks.github, 'compare', lambda *args: self.fail('Must not compare')):
@@ -168,7 +169,8 @@ class EtaTests(SimpleTestCase):
         self.assertAlmostEqual(OpenBench.eta.remaining_seconds(test, now), 3840 * 6.0)
 
         self.assertEqual(OpenBench.eta.describe(None), '-')
-        self.assertEqual(OpenBench.eta.describe(30), '~1m')
+        self.assertEqual(OpenBench.eta.describe(10), '<1m')
+        self.assertEqual(OpenBench.eta.describe(60), '~1m')
         self.assertEqual(OpenBench.eta.describe(3600 * 2 + 600), '~2h 10m')
         self.assertEqual(OpenBench.eta.describe(3600 * 76), '~3d 4h')
 
@@ -281,7 +283,7 @@ class FakeGithub:
         return 'e' * 40
 
 @mock.patch('OpenBench.workloads.verify_workload.collect_github_info', TW.fake_github)
-@mock.patch('OpenBench.workloads.create_workload.run_checks', lambda workload: {})
+@mock.patch('OpenBench.workloads.create_workload.run_checks', lambda workload, check_base=False: {})
 @mock.patch('OpenBench.workflows.runner.lookup_commit', TW.fake_commit)
 class FeatureRunnerTests(TestCase):
 
@@ -420,6 +422,19 @@ class FeatureRunnerTests(TestCase):
         self.assertEqual((nodes['same'].test.elolower, nodes['same'].test.eloupper), (-3.0, 1.0))
         self.assertIn('[Same Bench, so bounds [-3.00, 1.00]]', nodes['same'].test.info)
         self.assertEqual((nodes['other'].test.elolower, nodes['other'].test.eloupper), (0.0, 3.0))
+
+    def test_pinned_bases_are_checked(self):
+
+        calls = []
+        graph = { 'defaults' : {}, 'edges' : [ edge('a', 'passed', 'b') ], 'nodes' : {
+            'a' : node('SPRT', dev='x', base='main'), 'b' : node('SPRT', dev='@a.dev', base='@a.base') } }
+
+        with mock.patch('OpenBench.workloads.create_workload.run_checks', lambda test, check_base=False: calls.append(check_base) or {}):
+            workflow = self.create(graph)
+            self.finish_sprt(self.nodes(workflow)['a'].test, passed=True)
+            self.step(workflow)
+
+        self.assertEqual(calls, [True, False]) # Only a Base pinned from a branch can have moved on
 
     # # # Errors while playing
 
@@ -662,3 +677,296 @@ class FeatureRunnerTests(TestCase):
 
         self.assertIn('could not be found', point.error)
         self.assertIsNone(point.test)
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+#                          PUSH-TO-TEST AND THE PAGES                         #
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+import hashlib
+import hmac
+import json
+
+from OpenBench import automation
+from OpenBench.models import PushEvent, Workflow, WorkflowTemplate
+
+SECRET = 'top-secret'
+
+def signed(body, secret=SECRET):
+    return 'sha256=' + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+def push_payload(branch='feature', message='Try LMR [ob]', repo='https://github.com/Xenymor/Fispur', sha='a' * 40):
+    return json.dumps({ 'ref' : 'refs/heads/%s' % (branch), 'after' : sha, 'deleted' : False,
+                        'repository' : { 'html_url' : repo }, 'head_commit' : { 'message' : message } }).encode()
+
+class AutomationUnitTests(SimpleTestCase):
+
+    def test_markers(self):
+        self.assertEqual(automation.markers('Fix [ob] and [OB:ltc] [ob:ltc] [ob:smp-1.0]'), ['default', 'ltc', 'smp-1.0'])
+        self.assertEqual(automation.markers('No marker [ob:] [obx]'), [])
+
+    def test_substitute(self):
+        graph = { 'a' : { 'config' : { 'dev' : '$branch', 'title' : 'Merge $branch', 'n' : 3 }, 'label' : 'STC $branch' } }
+        self.assertEqual(automation.substitute(graph, 'lmr'),
+                         { 'a' : { 'config' : { 'dev' : 'lmr', 'title' : 'Merge lmr', 'n' : 3 }, 'label' : 'STC lmr' } })
+
+    def test_signatures(self):
+        body = b'{}'
+        self.assertTrue(automation.verify_signature(SECRET, body, signed(body)))
+        self.assertFalse(automation.verify_signature(SECRET, body, signed(body, 'other')))
+        self.assertFalse(automation.verify_signature(SECRET, body, ''))
+
+@mock.patch('OpenBench.workloads.verify_workload.collect_github_info', TW.fake_github)
+@mock.patch('OpenBench.workloads.create_workload.run_checks', lambda workload, check_base=False: {})
+@mock.patch('OpenBench.workflows.runner.lookup_commit', TW.fake_commit)
+class AutomationTests(TestCase):
+
+    setUp    = TW.RunnerTests.setUp
+    defaults = TW.RunnerTests.defaults
+
+    def template(self, name='default', **extra):
+        graph = { 'defaults' : self.defaults(), 'edges' : [ edge('stc', 'passed', 'merge') ], 'nodes' : {
+            'stc'   : node('SPRT', dev='$branch', base='main'),
+            'merge' : node('MERGE', source='@stc.dev') } }
+        graph['nodes']['stc']['label'] = 'STC $branch'
+        return WorkflowTemplate.objects.create(name=name, author=self.user.username, graph=graph, **extra)
+
+    def post_push(self, body, event='push', secret=SECRET, delivery='d1'):
+        with mock.patch.object(automation, 'read_secret', lambda: SECRET):
+            return self.client.post('/api/github/push/', body, content_type='application/json',
+                HTTP_X_HUB_SIGNATURE_256=signed(body, secret), HTTP_X_GITHUB_EVENT=event, HTTP_X_GITHUB_DELIVERY=delivery)
+
+    def process(self):
+        sent = []
+        with mock.patch.object(notifications, 'send', lambda build: sent.extend(build(''))), \
+             mock.patch.object(automation.ladder, 'request_poll') as poll:
+            automation.process_pushes()
+        return [message['embeds'][0]['title'] for message in sent], poll
+
+    def test_webhook_queues_pushes(self):
+
+        body = push_payload()
+        self.assertEqual(self.post_push(body).status_code, 202)
+        self.assertEqual(self.post_push(body).json(), { 'queued' : False }) # Redelivered
+        self.assertEqual(self.post_push(body, secret='wrong', delivery='d2').status_code, 403)
+        self.assertEqual(self.post_push(b'{}', event='ping', delivery='d3').json(), { 'pong' : True })
+        self.assertEqual(self.post_push(push_payload().replace(b'refs/heads/', b'refs/tags/'), delivery='d4').status_code, 200)
+
+        event = PushEvent.objects.get()
+        self.assertEqual((event.branch, event.repo, event.sha, event.processed), ('feature', 'https://github.com/Xenymor/Fispur', 'a' * 40, False))
+
+        with mock.patch.object(automation, 'read_secret', lambda: None):
+            self.assertEqual(self.client.post('/api/github/push/', body, content_type='application/json').status_code, 404)
+
+    def test_push_starts_the_template(self):
+
+        self.template()
+        self.post_push(push_payload())
+        sent, poll = self.process()
+
+        workflow = Workflow.objects.get()
+        self.assertEqual(workflow.name, 'default: feature')
+        self.assertEqual(workflow.graph['nodes']['stc']['config']['dev'], 'feature')
+        self.assertEqual(workflow.graph['nodes']['stc']['label'], 'STC feature')
+        self.assertEqual(workflow.nodes.get(key='stc').test.dev.name, 'feature')
+
+        event = PushEvent.objects.get()
+        self.assertEqual((event.processed, event.result), (True, 'Started Workflow #%d' % (workflow.id)))
+        self.assertEqual(sent, ['Push of feature started Workflow #%d' % (workflow.id)])
+        poll.assert_called_once_with('https://github.com/Xenymor/Fispur', 'feature')
+
+        # Processed once only
+        self.assertEqual(self.process()[0], [])
+
+    def test_pushes_that_start_nothing(self):
+
+        self.template(name='ltc', enabled=False)
+        other = self.template(name='other')
+        other.graph['defaults']['dev_repo'] = 'https://github.com/someone/else'
+        other.save()
+
+        for number, message in enumerate(['No marker', 'Disabled [ob:ltc]', 'Other repo [ob:other]', 'Unknown [ob:nope]']):
+            self.post_push(push_payload(message=message), delivery='d%d' % (number))
+
+        sent, poll = self.process()
+        results = list(PushEvent.objects.order_by('id').values_list('result', flat=True))
+        self.assertEqual(results, ['No markers', 'No enabled Template "ltc"', 'Template other is for another repository', 'No enabled Template "nope"'])
+        self.assertEqual(Workflow.objects.count(), 0)
+        self.assertEqual(len(sent), 2) # The unknown Templates need attention
+
+    def test_failing_templates_are_announced(self):
+
+        self.template()
+        self.post_push(push_payload(branch='missing'))
+        sent, poll = self.process()
+
+        self.assertEqual(Workflow.objects.count(), 0)
+        self.assertTrue(PushEvent.objects.get().result.startswith('Template default failed: STC missing'), PushEvent.objects.get().result)
+        self.assertEqual(sent, ['Push of missing could not start Template default'])
+
+    def test_verify_template(self):
+
+        graph = self.template().graph
+        self.assertEqual(automation.verify_template('ltc', graph), [])
+        self.assertIn('Template names are', automation.verify_template('a b', graph)[0])
+
+        attached = json.loads(json.dumps(graph))
+        attached['nodes']['stc']['config']['existing_test'] = '5'
+        attached['edges'] = []
+        attached['nodes'].pop('merge')
+        self.assertIn('Templates cannot attach existing Tests', automation.verify_template('x', attached)[0])
+
+        unknown = json.loads(json.dumps(graph))
+        unknown['defaults']['dev_repo'] = ''
+        self.assertIn('Dev Source', automation.verify_template('x', unknown)[0])
+
+    def test_template_pages(self):
+
+        self.client.force_login(self.user)
+        template = self.template()
+
+        self.assertContains(self.client.get('/workflow/templates/'), '[ob]')
+        self.assertContains(self.client.get('/workflow/templates/default/edit/'), 'Save Template')
+        self.assertContains(self.client.get('/workflow/templates/new/?from=default'), 'copy-of-default')
+
+        # Saving from the editor, which posts JSON
+        graph  = dict(template.graph)
+        answer = self.client.post('/workflow/templates/new/', json.dumps({ 'name' : 'ltc', 'graph' : graph }), content_type='application/json')
+        self.assertEqual(answer.json(), { 'redirect' : '/workflow/templates/' })
+        answer = self.client.post('/workflow/templates/new/', json.dumps({ 'name' : 'LTC', 'graph' : graph }), content_type='application/json')
+        self.assertEqual(answer.json(), { 'errors' : ['A Template named LTC already exists'] })
+
+        # Started by hand, disabled, and deleted
+        answer   = self.client.post('/workflow/templates/ltc/start/', { 'branch' : 'lmr' })
+        workflow = Workflow.objects.get(name='ltc: lmr')
+        self.assertRedirects(answer, '/workflow/%d/' % (workflow.id), fetch_redirect_response=False)
+
+        self.client.post('/workflow/templates/ltc/toggle/')
+        self.assertFalse(WorkflowTemplate.objects.get(name='ltc').enabled)
+        self.client.post('/workflow/templates/ltc/delete/')
+        self.assertFalse(WorkflowTemplate.objects.filter(name='ltc').exists())
+
+        # A Workflow can be saved as a Template, without its attached Tests
+        self.assertContains(self.client.get('/workflow/%d/' % (workflow.id)), 'Save as Template')
+        self.assertContains(self.client.get('/workflow/templates/new/?from=%d' % (workflow.id)), 'Create Template')
+
+    def test_other_users_cannot_change_templates(self):
+        other = User.objects.create_user('other', password='x')
+        Profile.objects.create(user=other, enabled=True)
+        self.template()
+        self.client.force_login(other)
+        self.client.post('/workflow/templates/default/delete/')
+        self.assertTrue(WorkflowTemplate.objects.filter(name='default').exists())
+
+@mock.patch('OpenBench.workloads.verify_workload.collect_github_info', TW.fake_github)
+@mock.patch('OpenBench.workloads.create_workload.run_checks', lambda workload, check_base=False: { 'same_bench' : True, 'behind' : 3 })
+@mock.patch('OpenBench.workflows.runner.lookup_commit', TW.fake_commit)
+class PageTests(TestCase):
+
+    setUp    = TW.RunnerTests.setUp
+    defaults = TW.RunnerTests.defaults
+    create   = TW.RunnerTests.create
+    nodes    = TW.RunnerTests.nodes
+
+    def sprt(self, dev='lmr'):
+        workflow = self.create({ 'defaults' : {}, 'edges' : [], 'nodes' : { 'a' : node('SPRT', dev=dev, base='main') } })
+        return self.nodes(workflow)['a'].test
+
+    def test_workload_page(self):
+
+        test  = self.sprt()
+        older = self.sprt()
+        Test.objects.filter(id=test.id).update(crashes=2, tags='search lmr', notes='Reduce more', stop_reason='Stopped by OpenBench: 3 crashes', finished=True)
+
+        self.client.force_login(self.user)
+        page = self.client.get('/test/%d/' % (test.id))
+        self.assertContains(page, 'Dev and Base have the same Bench')
+        self.assertContains(page, 'Dev is 3 commits behind Base')
+        self.assertContains(page, '2 crashes, 0 time losses, 0 illegal moves')
+        self.assertContains(page, 'Stopped by OpenBench: 3 crashes')
+        self.assertContains(page, '/search/?tags=search')
+        self.assertContains(page, 'Earlier Workloads of lmr')
+        self.assertContains(page, 'href="/test/%d/"' % (older.id))
+
+    def test_tags_notes_and_search(self):
+
+        test = self.sprt()
+        self.client.force_login(self.user)
+        self.client.post('/test/%d/MODIFY/' % (test.id), { 'tags' : 'lmr, search lmr', 'notes' : 'First try', 'priority' : '0', 'throughput' : '1000' })
+
+        test = Test.objects.get(id=test.id)
+        self.assertEqual((test.tags, test.notes), ('lmr search', 'First try'))
+
+        self.assertContains(self.client.get('/search/?tags=search+LMR'), 'href="/test/%d/"' % (test.id))
+        self.assertNotContains(self.client.get('/search/?tags=searc'), 'href="/test/%d/"' % (test.id))
+        self.assertContains(self.client.get('/search/?notes-contains=first'), 'href="/test/%d/"' % (test.id))
+
+        # Tags are matched whole, whatever characters they hold
+        Test.objects.filter(id=test.id).update(tags='c++ a.b')
+        self.assertContains(self.client.get('/search/?tags=C%2B%2B'), 'href="/test/%d/"' % (test.id))
+        self.assertContains(self.client.get('/search/?tags=a.b'), 'href="/test/%d/"' % (test.id))
+        self.assertNotContains(self.client.get('/search/?tags=a'), 'href="/test/%d/"' % (test.id))
+
+    def test_changelog(self):
+
+        passed = self.sprt('lmr')
+        simple = self.sprt('simplify')
+        failed = self.sprt('worse')
+        Test.objects.filter(id=passed.id).update(passed=True, finished=True, notes='Reduce more\nDetails')
+        Test.objects.filter(id=simple.id).update(passed=True, finished=True, elolower=-3.0, eloupper=1.0)
+        Test.objects.filter(id=failed.id).update(failed=True, finished=True)
+
+        self.client.force_login(self.user)
+        page = self.client.get('/changelog/?engine=Fispur&since=2000-01-01')
+        self.assertContains(page, '1 gainer, 1 simplification')
+        self.assertContains(page, '- lmr: ')
+        self.assertContains(page, '(Test #%d) - Reduce more' % (passed.id))
+        self.assertContains(page, '## Simplifications')
+        self.assertNotContains(page, 'worse')
+
+        # A tag or branch is resolved to the date of its commit
+        with mock.patch.object(github, 'commit', lambda repo, engine, ref: { 'sha' : 'a' * 40, 'message' : '', 'date' : '2999-01-01T00:00:00Z' }):
+            self.assertContains(self.client.get('/changelog/?engine=Fispur&since=v1.0'), 'No SPRT passed in that time')
+
+    def test_ladder_pages(self):
+
+        fake = FakeGithub(heads={ 'main' : TW.fake_sha('anchor') }); fake.install(self)
+        self.client.force_login(self.user)
+
+        self.assertContains(self.client.get('/ladders/'), 'Create a Ladder')
+        answer  = self.client.post('/ladders/', { 'name' : 'Main', 'engine' : 'Fispur', 'branch' : 'main', 'games' : '500', 'poll_hours' : '6' })
+        created = Ladder.objects.get()
+        self.assertRedirects(answer, '/ladder/%d/' % (created.id), fetch_redirect_response=False)
+
+        fake.heads['main'] = TW.fake_sha('newer')
+        self.client.post('/ladder/%d/measure/' % (created.id))
+        point = created.points.get()
+
+        page = self.client.get('/ladder/%d/' % (created.id))
+        self.assertContains(page, 'Elo against the anchor')
+        self.assertContains(page, TW.fake_sha('newer')[:8])
+        self.assertContains(self.client.get('/test/%d/' % (point.test_id)), '#%d Main' % (created.id))
+        self.assertContains(self.client.get('/ladders/'), 'Main')
+
+        self.client.post('/ladder/%d/toggle/' % (created.id))
+        self.assertFalse(Ladder.objects.get().enabled)
+        self.client.post('/ladder/%d/delete/' % (created.id))
+        self.assertFalse(Ladder.objects.exists())
+        self.assertTrue(Test.objects.filter(id=point.test_id).exists())
+
+    def test_spsa_history_api(self):
+
+        graph = { 'defaults' : {}, 'edges' : [], 'nodes' : { 'tune' : node('SPSA', dev='x', spsa_inputs='A, int, 10, 0, 100, 2, 0.002') } }
+        test  = self.nodes(self.create(graph))['tune'].test
+        SPSASnapshot.objects.create(spsa_run=test.spsa_run, games=40, values=[12.0])
+
+        self.client.force_login(self.user)
+        data = self.client.get('/api/spsa/%d/history/' % (test.id)).json()
+        self.assertEqual(data['games'], [0, 40])
+        self.assertEqual(data['params'][0]['values'], [10.0, 12.0])
+        self.assertContains(self.client.get('/tune/%d/' % (test.id)), 'Show SPSA History')
+
+    def test_sidebar_links(self):
+        self.client.force_login(self.user)
+        page = self.client.get('/index/')
+        for link in ['/workflow/templates/', '/ladders/', '/changelog/']:
+            self.assertContains(page, 'href="%s"' % (link))

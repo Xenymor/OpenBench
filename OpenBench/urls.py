@@ -18,7 +18,7 @@
 #                                                                             #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-import django.urls, OpenBench.views, OpenBench.workflows.views
+import django.urls, OpenBench.views, OpenBench.workflows.views, OpenBench.feature_views
 
 urlpatterns = [
 
@@ -50,8 +50,17 @@ urlpatterns = [
     # Links to create, view or manage Workflows of Workloads
     django.urls.path(r'workflows/', OpenBench.workflows.views.workflows),
     django.urls.path(r'workflow/new/', OpenBench.workflows.views.new_workflow),
+    django.urls.path(r'workflow/templates/', OpenBench.workflows.views.templates),
+    django.urls.path(r'workflow/templates/new/', OpenBench.workflows.views.new_template),
+    django.urls.path(r'workflow/templates/<str:name>/<str:action>/', OpenBench.workflows.views.template),
     django.urls.path(r'workflow/<int:pk>/', OpenBench.workflows.views.workflow),
     django.urls.path(r'workflow/<int:pk>/<str:action>/', OpenBench.workflows.views.workflow),
+
+    # Ladders, which measure every new commit of a branch against an anchor, and the changelog
+    django.urls.path(r'ladders/', OpenBench.feature_views.ladders),
+    django.urls.path(r'ladder/<int:pk>/', OpenBench.feature_views.ladder_view),
+    django.urls.path(r'ladder/<int:pk>/<str:action>/', OpenBench.feature_views.ladder_view),
+    django.urls.path(r'changelog/', OpenBench.feature_views.changelog),
 
     # Links for viewing and managing Networks
     django.urls.path(r'networks/', OpenBench.views.networks),
@@ -99,6 +108,7 @@ urlpatterns = [
     django.urls.path(r'api/pgns/<int:pgn_id>/', OpenBench.views.api_pgns),
     django.urls.path(r'api/spsa/<int:workload_id>/<str:query>/', OpenBench.views.api_spsa),
     django.urls.path(r'api/workload/<int:workload_id>/<str:query>/', OpenBench.views.api_workload),
+    django.urls.path(r'api/github/push/', OpenBench.feature_views.github_push),
 
     # Redirect anything else to the Index
     django.urls.path(r'', OpenBench.views.index),
