@@ -28,7 +28,7 @@ from django.test import TestCase
 
 import OpenBench.views # Before the workload modules, which only import cleanly once it is loaded
 
-from OpenBench.models import Engine, EngineConfig, LogEvent, Profile, Test
+from OpenBench.models import Engine, EngineConfig, LogEvent, Network, Profile, Test
 from OpenBench.workloads import verify_workload
 
 SHA  = 'a' * 40
@@ -247,11 +247,11 @@ class BenchCarryOverTests(TestCase):
 
         with mock.patch.object(verify_workload, 'resolve_commit', fake_commit('Something\n\nBench: 1,600,000')):
 
-            self.assertEqual(self.client.get(url, params).json(), { 'sha' : SHA, 'known' : None, 'message_bench' : 1600000 })
+            self.assertEqual(self.client.get(url, params).json(), { 'sha' : SHA, 'known' : None, 'message_bench' : 1600000, 'message_applies' : True })
 
             test  = self.workload(555)
             known = { 'bench' : 555, 'workload' : { 'id' : test.id, 'type' : 'test' } }
-            self.assertEqual(self.client.get(url, params).json(), { 'sha' : SHA, 'known' : known, 'message_bench' : 1600000 })
+            self.assertEqual(self.client.get(url, params).json(), { 'sha' : SHA, 'known' : known, 'message_bench' : 1600000, 'message_applies' : True })
 
             self.assertIn('error', self.client.get(url, dict(params, engine='Nope')).json())
             self.assertIn('error', self.client.get(url, dict(params, repo='https://example.com/x/y')).json())
@@ -260,6 +260,91 @@ class BenchCarryOverTests(TestCase):
 
         # With the sha of an earlier lookup, only the database is asked
         with mock.patch.object(verify_workload, 'resolve_commit', side_effect=AssertionError('Github was asked')):
-            self.assertEqual(self.client.get(url, dict(params, sha=SHA.upper(), network='aaaa1111')).json(), { 'sha' : SHA, 'known' : None })
-            self.assertEqual(self.client.get(url, dict(params, sha=SHA)).json(), { 'sha' : SHA, 'known' : known })
+            self.assertEqual(self.client.get(url, dict(params, sha=SHA.upper(), network='aaaa1111')).json(), { 'sha' : SHA, 'known' : None, 'message_applies' : False })
+            self.assertEqual(self.client.get(url, dict(params, sha=SHA)).json(), { 'sha' : SHA, 'known' : known, 'message_applies' : True })
             self.assertIn('error', self.client.get(url, dict(params, sha='abc')).json())
+
+class NetworkBenchTests(TestCase):
+
+    # The Bench in a commit message was measured with the engine's default Network. Another
+    # Network searches differently, so its Bench must come from somewhere else.
+
+    def setUp(self):
+        self.user = User.objects.create_user('Xenymor', password='x')
+        Profile.objects.create(user=self.user, enabled=True)
+        EngineConfig.objects.create(name='Fispur', source=REPO, nps=1000000)
+        Network.objects.create(engine='Fispur', sha256='DEFAULT1', name='default-net', author='x', default=True)
+        Network.objects.create(engine='Fispur', sha256='OTHERNET', name='other-net', author='x')
+
+    def collect(self, side, network, bench='Autofill'):
+        errors = []
+        post   = { '%s_branch' % (side) : 'main', '%s_repo' % (side) : REPO, '%s_engine' % (side) : 'Fispur',
+                   '%s_network' % (side) : network, '%s_bench' % (side) : bench, 'info' : '' }
+        with mock.patch.object(verify_workload, 'resolve_commit', fake_commit('Speedup\n\nBench: 1234')):
+            info = verify_workload.collect_github_info(errors, SimpleNamespace(POST=post), side)
+        return (info[3] if info else None), errors
+
+    def test_same_commit_with_two_networks(self):
+
+        # The default Network, or none at all, takes the Bench of the commit message
+        self.assertEqual(self.collect('dev', 'DEFAULT1'), (1234, []))
+        self.assertEqual(self.collect('dev', ''), (1234, []))
+
+        # Another Network does not, since its Bench differs
+        bench, errors = self.collect('base', 'OTHERNET')
+        self.assertIsNone(bench)
+        self.assertIn('was measured with another Network', errors[0])
+
+        # Given by hand, or confirmed by an earlier Test with that Network, it is used
+        self.assertEqual(self.collect('base', 'OTHERNET', bench='5678'), (5678, []))
+        dev  = Engine.objects.create(name='main', source='', sha=SHA, bench=5678)
+        Test.objects.create(author='Xenymor', book_name='UHO.epd', games=10, dev=dev, base=dev, dev_engine='Fispur',
+                            base_engine='Fispur', dev_repo=REPO, base_repo=REPO, dev_network='OTHERNET', base_network='OTHERNET')
+        self.assertEqual(self.collect('base', 'OTHERNET'), (5678, []))
+
+    def test_api_bench_only_offers_the_message_bench_for_the_default_network(self):
+
+        self.client.login(username='Xenymor', password='x')
+        params = { 'engine' : 'Fispur', 'repo' : REPO, 'branch' : 'main' }
+
+        with mock.patch.object(verify_workload, 'resolve_commit', fake_commit('Bench: 1234')):
+            self.assertEqual(self.client.get('/api/bench/', dict(params, network='DEFAULT1')).json()['message_bench'], 1234)
+            self.assertIsNone(self.client.get('/api/bench/', dict(params, network='OTHERNET')).json()['message_bench'])
+
+        # Looked up again by its sha, for another Network: the form must not reuse the cached Bench
+        answer = self.client.get('/api/bench/', dict(params, network='OTHERNET', sha=SHA)).json()
+        self.assertEqual(answer, { 'sha' : SHA, 'known' : None, 'message_applies' : False })
+        answer = self.client.get('/api/bench/', dict(params, network='DEFAULT1', sha=SHA)).json()
+        self.assertTrue(answer['message_applies'])
+
+    def test_one_restart_fixes_both_wrong_benches(self):
+
+        # The same commit with two Networks, as a Test of a new net. Both Benches turn out wrong,
+        # and the client reports both before it stops, so one restart with the measured Benches fixes them.
+        from OpenBench.config import OPENBENCH_CONFIG
+        from OpenBench.models import Machine, ServerState
+
+        dev  = Engine.objects.create(name='main', source='', sha=SHA, bench=1234)
+        base = Engine.objects.create(name='main', source='', sha=SHA, bench=1234)
+        test = Test.objects.create(author='Xenymor', book_name='UHO.epd', dev=dev, base=base, dev_engine='Fispur',
+                                   base_engine='Fispur', dev_repo=REPO, base_repo=REPO, dev_network='OTHERNET', base_network='DEFAULT1')
+
+        info    = { 'client_ver' : OPENBENCH_CONFIG['client_version'], 'OPENBENCH_CONFIG_CHECKSUM' : ServerState.checksum() }
+        machine = Machine.objects.create(user=self.user, secret='s', info=info)
+        report  = lambda binary, bench: self.client.post('/clientBenchError/', { 'machine_id' : machine.id, 'secret' : 's',
+                      'test_id' : test.id, 'error' : '[%s] Wrong Bench: %d' % (binary, bench) }).json()
+
+        self.assertEqual(report('Fispur-AAAAAAAA-OTHERNET.exe', 2222), {})
+        self.assertEqual(report('Fispur-AAAAAAAA-DEFAULT1', 3333), {})
+        self.assertTrue(Test.objects.get(id=test.id).finished)
+
+        self.client.login(username='Xenymor', password='x')
+        self.client.get('/test/%d/REBENCH/' % (test.id))
+
+        test = Test.objects.get(id=test.id)
+        self.assertEqual((test.finished, test.dev.bench, test.base.bench), (False, 2222, 3333))
+
+        # Confirmed by games, each Network now autofills its own Bench
+        Test.objects.filter(id=test.id).update(games=100)
+        self.assertEqual(self.collect('dev', 'OTHERNET'), (2222, []))
+        self.assertEqual(self.collect('dev', 'DEFAULT1'), (3333, []))

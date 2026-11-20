@@ -152,7 +152,7 @@ def create_ladder(user, fields):
 def resolve_anchor(engine, repo, ref, given_bench, network):
 
     # (commit, bench), or raises ValueError with what went wrong
-    from OpenBench.workloads.verify_workload import known_bench, message_bench, parse_bench
+    from OpenBench.workloads.verify_workload import known_bench, message_applies, message_bench, parse_bench
 
     try: commit = github.commit(repo, engine, ref)
     except github.GithubError as error:
@@ -163,7 +163,7 @@ def resolve_anchor(engine, repo, ref, given_bench, network):
         raise ValueError('The anchor Bench must be a positive number, or empty to autofill it')
 
     known = known_bench(engine, commit['sha'], network)
-    bench = given or (known[0] if known else None) or message_bench(commit['message'])
+    bench = given or (known[0] if known else None) or (message_applies(engine, network) and message_bench(commit['message']))
 
     if not bench:
         raise ValueError('Unable to find a Bench for the anchor %s, so please give it' % (commit['sha'][:8]))

@@ -986,7 +986,7 @@ class RunnerTests(TestCase):
 
     def test_benches_of_branches_with_other_nets(self):
 
-        Network.objects.create(engine='Fispur', sha256='aaaa1111', name='net-a', author='Xenymor')
+        Network.objects.create(engine='Fispur', sha256='aaaa1111', name='net-a', author='Xenymor', default=True)
         Network.objects.create(engine='Fispur', sha256='bbbb2222', name='net-b', author='Xenymor')
 
         def graph_with(**config):
@@ -1005,6 +1005,12 @@ class RunnerTests(TestCase):
         workflow, errors = runner.create_workflow(self.user, 'Commas', graph_with(dev_network='bbbb2222', dev_bench='1,600,000'))
         self.assertIsNone(errors)
         self.assertEqual(self.nodes(workflow)['a'].test.dev.bench, 1600000)
+
+        # Defaults with another net than the engine's default: the commit's Bench is not taken either
+        defaults = dict(self.defaults(), dev_network='bbbb2222', base_network='aaaa1111')
+        graph    = { 'defaults' : defaults, 'nodes' : { 'a' : node('SPRT', dev='feature', base='main') }, 'edges' : [] }
+        workflow, errors = runner.create_workflow(self.user, 'Other default', graph)
+        self.assertEqual(errors, ['a: The Bench in the commit message of feature was measured with another Network, so give the Dev Bench'])
 
     def wrong_bench(self, test, side, measured, network='', exe=False):
 

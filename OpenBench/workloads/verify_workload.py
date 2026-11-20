@@ -538,11 +538,24 @@ def determine_bench(errors, request, field, engine, sha, network, message):
     if (known := known_bench(engine, sha, network)):
         return known[0]
 
-    if (bench := message_bench(message)):
+    if (bench := message_bench(message)) and message_applies(engine, network):
         return bench
 
-    errors.append('Unable to parse a Bench for %s' % (branch))
+    if bench:
+        errors.append('The Bench in the commit message of %s was measured with another Network, so give the %s Bench with this one'
+                      % (branch, field.title()))
+    else:
+        errors.append('Unable to parse a Bench for %s' % (branch))
     return None
+
+def message_applies(engine, network):
+
+    # Whether the Bench in a commit message fits a Network. It was measured with the engine's
+    # default Network, or without any, while another Network searches, and benches, differently.
+    # Only checked when nothing else is known, so it costs a query only then.
+    if not (network or ''):
+        return True
+    return Network.objects.filter(engine=engine, sha256=network, default=True).exists()
 
 def message_bench(message):
 
@@ -600,9 +613,10 @@ def known_bench(engine, sha, network):
 def lookup_bench(engine, repo, branch, network, sha=''):
 
     # What a Workload with these settings would autofill, for create_workload.js: { 'sha', 'known',
-    # 'message_bench' } or { 'error' }. 'known' is the Bench of an earlier Workload, as known_bench()
-    # finds it, and wins over the Bench in the commit message. Given the sha that an earlier lookup
-    # resolved the branch to, only 'known' is looked up again, without asking Github.
+    # 'message_bench', 'message_applies' } or { 'error' }. 'known' is the Bench of an earlier Workload,
+    # as known_bench() finds it, and wins over the Bench in the commit message, which only applies to
+    # the default Network, see message_applies(). Given the sha that an earlier lookup resolved the
+    # branch to, only 'known' and 'message_applies' are looked up again, without asking Github.
     branch, network, sha = branch.strip(), network.strip(), sha.strip().lower()
 
     if not EngineConfig.objects.filter(name=engine, enabled=True).exists():
@@ -619,7 +633,7 @@ def lookup_bench(engine, repo, branch, network, sha=''):
     if sha:
         if not GITHUB_SHA.match(sha):
             return { 'error' : 'Malformed sha' }
-        return { 'sha' : sha, 'known' : known_dict(sha) }
+        return { 'sha' : sha, 'known' : known_dict(sha), 'message_applies' : message_applies(engine, network) }
 
     if not branch:
         return { 'error' : 'No Branch given' }
@@ -629,7 +643,9 @@ def lookup_bench(engine, repo, branch, network, sha=''):
         return { 'error' : errors[0] }
 
     _, sha, message = commit
-    return { 'sha' : sha, 'known' : known_dict(sha), 'message_bench' : message_bench(message) }
+    applies = message_applies(engine, network)
+    return { 'sha' : sha, 'known' : known_dict(sha), 'message_bench' : message_bench(message) if applies else None,
+             'message_applies' : applies }
 
 def strip_message(message):
     lines = message.strip().split("\n")

@@ -348,10 +348,11 @@ function autofill_bench(target) {
                 return;
             }
 
+            // The commit's Bench is kept for every Network, but only fills in for the default one
             if (!cached)
                 bench_commits[key] = { sha : data.sha, message_bench : data.message_bench, time : Date.now() };
 
-            const message_bench = cached ? cached.message_bench : data.message_bench;
+            const message_bench = data.message_applies === false ? null : (cached ? cached.message_bench : data.message_bench);
             const short         = data.sha.substring(0, 8);
 
             if (data.known) {
@@ -366,7 +367,9 @@ function autofill_bench(target) {
             }
 
             else {
-                bench.title = 'Unable to parse a Bench for ' + name;
+                bench.title = data.message_applies === false
+                    ? 'The Bench in the commit message was measured with another Network, so give the Bench with this one'
+                    : 'Unable to parse a Bench for ' + name;
                 return;
             }
 

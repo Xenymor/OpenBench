@@ -412,8 +412,14 @@ def pin_commits(graph, locked={}):
 
             if (Graph.bench_override(config, side) is None
                 and not Verify.known_bench(engine['engine'], sha, engine['network'])
-                and not Verify.message_bench(message)):
-                errors.append('%s: Unable to parse a %s Bench for %s' % (name, side.title(), engine['branch']))
+                and not (Verify.message_bench(message) and Verify.message_applies(engine['engine'], engine['network']))):
+
+                # The commit's Bench belongs to the default Network, see Verify.message_applies()
+                if Verify.message_bench(message):
+                    errors.append('%s: The Bench in the commit message of %s was measured with another Network, so give the %s Bench'
+                                  % (name, engine['branch'], side.title()))
+                else:
+                    errors.append('%s: Unable to parse a %s Bench for %s' % (name, side.title(), engine['branch']))
                 continue
 
             pins.setdefault(key, {})[side] = sha

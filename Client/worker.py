@@ -61,7 +61,7 @@ from client import try_forever
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 50 # Client version to send to the Server
+CLIENT_VERSION   = 51 # Client version to send to the Server
 TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 60 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 60 # Timeout in seconds between workload requests
@@ -896,9 +896,19 @@ def find_pgn_error(reason, command):
 
 def determine_scale_factor(config, dev_name, base_name):
 
-    # Run the benchmarks and compute the scaling NPS value
-    dev_nps  = safe_run_benchmarks(config, 'dev' , dev_name )
-    base_nps = safe_run_benchmarks(config, 'base', base_name)
+    # Run the benchmarks and compute the scaling NPS value. Both engines are benched even when the
+    # first fails, so that the Server learns every wrong Bench at once, and a single restart with
+    # the measured Benches fixes both. Each failure was reported already, by safe_run_benchmarks().
+    speeds, failure = {}, None
+    for branch, name in [('dev', dev_name), ('base', base_name)]:
+        try: speeds[branch] = safe_run_benchmarks(config, branch, name)
+        except utils.OpenBenchBadBenchException as error:
+            failure = failure or error
+
+    if failure:
+        raise failure
+
+    dev_nps, base_nps = speeds['dev'], speeds['base']
     ServerReporter.report_nps(config, dev_nps, base_nps)
 
     dev_factor = base_factor = None
