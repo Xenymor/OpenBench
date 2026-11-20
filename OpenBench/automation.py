@@ -39,6 +39,7 @@
 # asks the Ladders of the pushed branch to look at it, see OpenBench/ladder.py.
 
 import copy
+import datetime
 import hashlib
 import hmac
 import json
@@ -47,6 +48,7 @@ import re
 import traceback
 
 from django.contrib.auth.models import User
+from django.utils import timezone
 
 from OpenBench import github
 from OpenBench import ladder
@@ -59,6 +61,7 @@ MARKER_PATTERN = re.compile(r'\[ob(?::([A-Za-z0-9_.-]{1,64}))?\]', re.IGNORECASE
 NAME_PATTERN   = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
 PLACEHOLDER    = '$branch'
 DEFAULT_NAME   = 'default'
+KEEP_DAYS      = 90 # Processed pushes are kept this long, to be looked at on the Templates page
 
 def read_secret(path=None):
     try:
@@ -184,7 +187,13 @@ def handle(event):
 def process_pushes(limit=20):
 
     # Called by the WorkflowWatcher. Each push is marked first, so that a broken one is never retried forever
-    for event in list(PushEvent.objects.filter(processed=False).order_by('id')[:limit]):
+    events = list(PushEvent.objects.filter(processed=False).order_by('id')[:limit])
+
+    # Only when there is something to do, the old ones are dropped as well
+    if events:
+        PushEvent.objects.filter(processed=True, created__lt=timezone.now() - datetime.timedelta(days=KEEP_DAYS)).delete()
+
+    for event in events:
 
         if not PushEvent.objects.filter(id=event.id, processed=False).update(processed=True):
             continue # Taken by another process

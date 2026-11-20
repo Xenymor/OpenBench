@@ -28,6 +28,7 @@
 import base64
 import os
 import re
+import urllib.parse
 
 import requests
 
@@ -40,6 +41,18 @@ SHA_PATTERN  = re.compile(r'^[0-9a-fA-F]{40}$')
 
 class GithubError(Exception):
     pass
+
+def quote_ref(ref):
+
+    # A branch, tag, sha or file path as part of an API URL. Refs come from users and pushes,
+    # and must never reach another endpoint of the API with our token: '..' is refused, which
+    # git does not allow in refs anyway, and everything is encoded, keeping only the slashes.
+    ref = str(ref or '').strip()
+
+    if not ref or '..' in ref or ref.startswith('/') or any(ord(char) < 32 for char in ref):
+        raise GithubError('Malformed branch, tag or path: %s' % (ref[:64]))
+
+    return urllib.parse.quote(ref, safe='/')
 
 def path_join(*args):
     # As path_join(), which cannot be imported here without a cycle through the views
@@ -107,7 +120,7 @@ def get(repo, engine, path):
 def commit(repo, engine, ref):
 
     # { 'sha', 'message', 'date' } of a branch, tag or sha
-    data = get(repo, engine, 'commits/%s' % (ref))
+    data = get(repo, engine, 'commits/%s' % (quote_ref(ref)))
     return {
         'sha'     : data['sha'].lower(),
         'message' : data['commit']['message'],
@@ -116,12 +129,12 @@ def commit(repo, engine, ref):
 
 def compare(repo, engine, base, head):
     # { 'ahead_by', 'behind_by', 'status' } of head relative to base
-    data = get(repo, engine, 'compare/%s...%s' % (base, head))
+    data = get(repo, engine, 'compare/%s...%s' % (quote_ref(base), quote_ref(head)))
     return { 'ahead_by' : data['ahead_by'], 'behind_by' : data['behind_by'], 'status' : data['status'] }
 
 def branch_exists(repo, engine, branch):
     try:
-        request('GET', path_join(api_base(repo), 'branches', branch), read_headers(engine))
+        request('GET', path_join(api_base(repo), 'branches', quote_ref(branch)), read_headers(engine))
         return True
     except GithubError as error:
         if '404' in str(error):
@@ -130,11 +143,12 @@ def branch_exists(repo, engine, branch):
 
 def create_branch(repo, engine, branch, sha):
     url = path_join(api_base(repo), 'git', 'refs')
+    quote_ref(branch) # Only checked, since it goes into the JSON as it is
     return request('POST', url, write_headers(engine, repo), { 'ref' : 'refs/heads/%s' % (branch), 'sha' : sha })
 
 def fast_forward(repo, engine, branch, sha):
     # Fails with Github's 422 unless sha is a descendant of the branch
-    url = path_join(api_base(repo), 'git', 'refs', 'heads', branch)
+    url = path_join(api_base(repo), 'git', 'refs', 'heads', quote_ref(branch))
     return request('PATCH', url, write_headers(engine, repo), { 'sha' : sha, 'force' : False })
 
 def merge(repo, engine, branch, sha, message):
@@ -157,7 +171,8 @@ def open_pull_request(repo, engine, head, base, title, body):
             raise
 
     owner = normalize_repo(repo).split('/')[3]
-    found = request('GET', url + '?state=open&head=%s:%s' % (owner, head), write_headers(engine, repo))
+    query = urllib.parse.urlencode({ 'state' : 'open', 'head' : '%s:%s' % (owner, quote_ref(head) and head) })
+    found = request('GET', url + '?' + query, write_headers(engine, repo))
     if isinstance(found, list) and found:
         return found[0]['html_url']
     raise GithubError('A pull request for %s already exists, but could not be found' % (head))
@@ -165,7 +180,7 @@ def open_pull_request(repo, engine, head, base, title, body):
 def read_file(repo, engine, path, ref):
 
     # (text, blob sha) of a file at a branch or commit
-    url  = path_join(api_base(repo), 'contents', path) + '?ref=%s' % (ref)
+    url  = path_join(api_base(repo), 'contents', quote_ref(path)) + '?ref=%s' % (urllib.parse.quote(quote_ref(ref) and ref, safe=''))
     data = request('GET', url, read_headers(engine))
 
     if data.get('type') != 'file' or data.get('encoding') != 'base64':
@@ -176,7 +191,8 @@ def read_file(repo, engine, path, ref):
 def write_file(repo, engine, path, branch, text, blob_sha, message):
 
     # The sha of the new commit on branch
-    url  = path_join(api_base(repo), 'contents', path)
+    url  = path_join(api_base(repo), 'contents', quote_ref(path))
+    quote_ref(branch)
     data = request('PUT', url, write_headers(engine, repo), {
         'message' : message, 'branch' : branch, 'sha' : blob_sha,
         'content' : base64.b64encode(text.encode('utf-8')).decode('ascii'),

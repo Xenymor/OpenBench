@@ -1045,3 +1045,51 @@ class FollowUpTests(TestCase):
 
         full = [(games, [50.0]) for games in range(2000, 3801, 20)]
         self.assertEqual(spsa_history.window_drift(run, params, full), 0.0)
+
+class GithubSafetyTests(SimpleTestCase):
+
+    def test_refs_never_leave_their_endpoint(self):
+
+        self.assertEqual(github.quote_ref('feature/lmr'), 'feature/lmr')
+        self.assertEqual(github.quote_ref('a&b=c#d?e'), 'a%26b%3Dc%23d%3Fe')
+
+        for ref in ['', '..', 'x/../../orgs', '/etc', 'a\nb', '../main']:
+            with self.assertRaises(github.GithubError, msg=ref):
+                github.quote_ref(ref)
+
+    def test_requests_use_the_encoded_refs(self):
+
+        urls = []
+        def answer(method, url, headers, json=None, timeout=None):
+            urls.append((method, url))
+            return SimpleNamespace(status_code=200, content=b'{}', json=lambda: {
+                'sha' : 'a' * 40, 'commit' : { 'message' : 'm', 'committer' : { 'date' : 'd' } },
+                'ahead_by' : 0, 'behind_by' : 0, 'status' : 'identical' })
+
+        with mock.patch.object(github.requests, 'request', answer):
+            github.commit('https://github.com/x/y', 'Fispur', 'v1&per_page=100')
+            github.compare('https://github.com/x/y', 'Fispur', 'main', 'a#b')
+
+        self.assertEqual(urls, [('GET', 'https://api.github.com/repos/x/y/commits/v1%26per_page%3D100'),
+                                ('GET', 'https://api.github.com/repos/x/y/compare/main...a%23b')])
+
+        with mock.patch.object(github.requests, 'request', lambda *args, **kwargs: self.fail('Must not be sent')):
+            with self.assertRaises(github.GithubError):
+                github.fast_forward('https://github.com/x/y', 'Fispur', 'main/../../../user', 'a' * 40)
+
+class PushCleanupTests(TestCase):
+
+    def test_old_pushes_are_dropped(self):
+
+        old = PushEvent.objects.create(delivery='old', repo='r', branch='b', sha='s', processed=True)
+        PushEvent.objects.filter(id=old.id).update(created=timezone.now() - datetime.timedelta(days=120))
+        recent = PushEvent.objects.create(delivery='recent', repo='r', branch='b', sha='s', processed=True)
+
+        automation.process_pushes() # Nothing new: nothing is touched
+        self.assertEqual(PushEvent.objects.count(), 2)
+
+        PushEvent.objects.create(delivery='new', repo='https://github.com/x/y', branch='b', sha='s', message='')
+        with mock.patch.object(automation.ladder, 'request_poll'):
+            automation.process_pushes()
+
+        self.assertEqual(sorted(PushEvent.objects.values_list('delivery', flat=True)), ['new', 'recent'])

@@ -29,7 +29,7 @@ from django.contrib.auth.models import User
 
 class Engine(Model):
 
-    name     = CharField(max_length=128)
+    name     = CharField(max_length=128, db_index=True) # Earlier Workloads of a branch are found by it, see view_workload()
     source   = CharField(max_length=1024)
     sha      = CharField(max_length=64, db_index=True) # Earlier Benches are found by it, see known_bench()
     bench    = IntegerField(default=0)
