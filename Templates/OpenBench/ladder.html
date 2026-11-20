@@ -67,11 +67,11 @@
     </table>
 
     {% if can_change %}
-        <form method="POST" action="/ladder/{{ ladder.id }}/anchor/" class="mt-2"
+        <form method="POST" action="/ladder/{{ ladder.id }}/anchor/" class="mt-2" style="display: flex; flex-wrap: wrap; gap: 4px;"
               onsubmit="return confirm('Measure against this anchor from now on? Earlier points stay, but leave the line.');">
             {% csrf_token %}
-            <input name="anchor" placeholder="New anchor: sha, branch or tag" style="width: 260px;">
-            <input name="anchor_bench" placeholder="Bench (autofill)" style="width: 140px;">
+            <input name="anchor" placeholder="New anchor: sha, branch or tag" style="flex: 2 1 200px;">
+            <input name="anchor_bench" placeholder="Bench (autofill)" style="flex: 1 1 120px;">
             <button class="anchorbutton btn-yellow" type="submit">Change Anchor</button>
         </form>
     {% endif %}

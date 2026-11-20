@@ -233,12 +233,29 @@ class GraphActionTests(SimpleTestCase):
     def test_apply_values(self):
 
         text = 'int Futility = 100;\nint LmrBase=7;\nfloat Scale = 1.5; // Futility = 3'
-        new, missing = actions.apply_values(text, [('Futility', '120'), ('LmrBase', '8'), ('Scale', '1.25'), ('Gone', '1')], Graph.DEFAULT_PATTERN)
+        new, missing = actions.apply_values(text, [('Futility', '120'), ('LmrBase', '8'), ('Scale', '1.25'), ('Gone', '1')], Graph.DEFAULT_PATTERNS)
         self.assertEqual(new, 'int Futility = 120;\nint LmrBase=8;\nfloat Scale = 1.25; // Futility = 3')
         self.assertEqual(missing, ['Gone'])
 
+        # Fispur's Tunables, whose aligned columns stay aligned
+        fispur = '\n'.join([
+            '            [Tunable(   72,     0,   400)]',
+            '            public static readonly int LmrBase = Tuning.resolve();',
+            '',
+            '            [Tunable(-1165, -4096,     0)]',
+            '            public static readonly int PVNodeReduction = Tuning.resolve();',
+            '            [Tunable(    9,     1,    16, poisoned = true)]',
+            '            public static readonly int RfpMaxDepth = Tuning.resolve();',
+        ])
+        new, missing = actions.apply_values(fispur, [('LmrBase', '8'), ('PVNodeReduction', '-980'), ('RfpMaxDepth', '10'), ('Rfp', '1')], Graph.DEFAULT_PATTERNS)
+        self.assertEqual(missing, ['Rfp'])
+        self.assertIn('[Tunable(    8,     0,   400)]', new)
+        self.assertIn('[Tunable( -980, -4096,     0)]', new)
+        self.assertIn('[Tunable(   10,     1,    16, poisoned = true)]', new)
+        self.assertEqual(new.count('Tuning.resolve()'), 3)
+
         # Names are taken literally, never as a pattern
-        self.assertEqual(actions.apply_values('a.b = 1; axb = 2', [('a.b', '5')], Graph.DEFAULT_PATTERN)[0], 'a.b = 5; axb = 2')
+        self.assertEqual(actions.apply_values('a.b = 1; axb = 2', [('a.b', '5')], Graph.DEFAULT_PATTERNS)[0], 'a.b = 5; axb = 2')
 
 class FakeGithub:
 
@@ -392,7 +409,7 @@ class FeatureRunnerTests(TestCase):
         self.assertEqual(fake.calls[2][:3], ('pr', branch, 'main'))
 
         # Running again changes nothing in the file, which already holds the values
-        self.assertEqual(actions.apply_values(fake.files['src/Search.cs'], [('A', '12'), ('B', '3')], Graph.DEFAULT_PATTERN)[0], fake.files['src/Search.cs'])
+        self.assertEqual(actions.apply_values(fake.files['src/Search.cs'], [('A', '12'), ('B', '3')], Graph.DEFAULT_PATTERNS)[0], fake.files['src/Search.cs'])
 
     def test_commit_with_missing_names_fails(self):
 

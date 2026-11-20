@@ -74,8 +74,15 @@ function ob_chart(container, options) {
         svg.append(ob_svg('text', { x : pad.left - 6, y : sy(tick) + 4, 'text-anchor' : 'end', fill : '#949BA4', 'font-size' : 11 }, yf(tick)));
     }
 
-    for (const tick of (options.x_ticks || ob_ticks(x0, x1, 6)))
-        svg.append(ob_svg('text', { x : sx(tick), y : height - pad.bottom + 16, 'text-anchor' : 'middle', fill : '#949BA4', 'font-size' : 11 }, xf(tick)));
+    // A single point gets one tick, and labels that repeat, like the same day for several hours, are shown once
+    const x_ticks = xs.every(x => x == xs[0]) ? [xs[0]] : (options.x_ticks || ob_ticks(x0, x1, 6));
+    let previous  = null;
+    for (const tick of x_ticks) {
+        const text = xf(tick);
+        if (text == previous) continue;
+        previous = text;
+        svg.append(ob_svg('text', { x : sx(tick), y : height - pad.bottom + 16, 'text-anchor' : 'middle', fill : '#949BA4', 'font-size' : 11 }, text));
+    }
 
     if (options.x_label)
         svg.append(ob_svg('text', { x : (pad.left + width - pad.right) / 2, y : height - 6, 'text-anchor' : 'middle', fill : '#DBDEE1', 'font-size' : 12 }, options.x_label));

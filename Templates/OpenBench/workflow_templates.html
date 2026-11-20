@@ -97,7 +97,7 @@
                 <td class="timestamp">{{ push.created|date:'U' }}</td>
                 <td>{{ push.branch }}</td>
                 <td title="{{ push.message }}">{{ push.sha|slice:":8" }}</td>
-                <td>{% if push.processed %}{{ push.result|default:"..." }}{% else %}Waiting{% endif %}</td>
+                <td title="{{ push.result }}" style="white-space: normal;">{% if push.processed %}{{ push.result|default:"..."|truncatechars:160 }}{% else %}Waiting{% endif %}</td>
             </tr>
         {% empty %}
             <tr><td colspan="4">No pushes received yet</td></tr>

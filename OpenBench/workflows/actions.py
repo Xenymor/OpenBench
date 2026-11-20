@@ -139,17 +139,25 @@ def effective_target(nodes, node, ref):
     from OpenBench.workflows.runner import effective_trigger
     return effective_trigger(nodes, node) if ref[0] == 'trigger' else ref[0]
 
-def apply_values(text, values, pattern):
+def apply_values(text, values, patterns):
 
-    # (new text, names that were not found). Each name's first match has its value replaced.
-    missing = []
+    # (new text, names that were not found). Each name's first match, of the first pattern
+    # that finds it, has its value replaced. A value with spaces before it keeps its width.
+    missing  = []
+    patterns = [patterns] if isinstance(patterns, str) else patterns
 
     for name, value in values:
-        match = re.search(pattern.replace('{name}', re.escape(name)), text)
-        if not match:
+
+        for pattern in patterns:
+            if match := re.search(pattern.replace('{name}', re.escape(name)), text):
+                break
+        else:
             missing.append(name)
             continue
-        text = text[:match.start(1)] + value + text[match.end(1):]
+
+        old = match.group(1)
+        new = value.rjust(len(old)) if old[:1].isspace() or pattern in Graph.ALIGNED_PATTERNS else value
+        text = text[:match.start(1)] + new + text[match.end(1):]
 
     return text, missing
 
@@ -166,8 +174,8 @@ def commit_values(workflow, nodes, node, config):
     test    = spsa.test
     repo    = test.dev_repo
     name    = test.dev_engine
-    path    = str(config.get('file', '')).strip()
-    pattern = str(config.get('pattern', '') or Graph.DEFAULT_PATTERN)
+    path    = str(config.get('file', '') or Graph.DEFAULT_FILE).strip()
+    pattern = str(config.get('pattern', '') or '').strip() or Graph.DEFAULT_PATTERNS
     branch  = str(config.get('branch', '') or '').strip() or 'openbench/tuned-wf%d-%s' % (workflow.id, node.key)
     target  = str(config.get('target', '') or 'main').strip()
     mode    = str(config.get('mode', '') or 'pr').strip()

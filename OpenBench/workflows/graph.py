@@ -77,9 +77,22 @@ ACTIONS      = ['MERGE', 'COMMIT']
 MERGE_MODES  = ['pr', 'merge', 'ff']
 COMMIT_MODES = ['pr', 'commit']
 
-# Finds the value of a parameter in a source file. {name} is replaced by the parameter's
-# name, and the first group is the value that is replaced.
-DEFAULT_PATTERN = r'\b{name}\b\s*=\s*(-?\d+(?:\.\d+)?)'
+# Find the value of a parameter in a source file. {name} is replaced by the parameter's
+# name, and the first group is the value that is replaced. Without a pattern of its own,
+# a COMMIT tries these in order. The first fits Fispur, whose Fispur.Tune.cs declares
+#
+#     [Tunable(   72,     0,   400)]
+#     public static readonly int LmrBase = Tuning.resolve();
+#
+# and the second plain assignments, like 'int LmrBase = 72;'. Values in the columns of the
+# Tunables keep their width, as do other values with spaces before them in their group.
+DEFAULT_PATTERNS = [
+    r'\[Tunable\((\s*-?\d+(?:\.\d+)?)\s*,[^\]]*\]\s*public\s+static\s+readonly\s+\w+\s+{name}\b',
+    r'\b{name}\b\s*=\s*(-?\d+(?:\.\d+)?)',
+]
+DEFAULT_PATTERN  = DEFAULT_PATTERNS[0]
+ALIGNED_PATTERNS = [DEFAULT_PATTERNS[0]]
+DEFAULT_FILE    = 'Fispur-Engine/src/Fispur/Fispur.Tune.cs'
 BOUNDS_PATTERN  = re.compile(r'^\[(-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)\]$') # As FLOAT_PAIR_PATTERN of the workload forms
 FILE_PATTERN    = re.compile(r'^(?!/)(?!.*\.\.)[A-Za-z0-9_./ -]{1,256}$')
 
@@ -455,10 +468,10 @@ def validate_action(graph, key, node):
         elif incoming(graph, key) and trigger_kinds(graph, key) != { 'SPSA' }:
             errors.append('%s: Without a Source, every incoming edge must come from an SPSA' % (name))
 
-        if not FILE_PATTERN.match(str(config.get('file', '') or '').strip()):
+        if not FILE_PATTERN.match(str(config.get('file', '') or DEFAULT_FILE).strip()):
             errors.append('%s: File must be a path within the repository, like src/Search.cs' % (name))
 
-        if not validate_pattern(str(config.get('pattern', '') or DEFAULT_PATTERN)):
+        if (pattern := str(config.get('pattern', '') or '').strip()) and not validate_pattern(pattern):
             errors.append('%s: Pattern must contain {name}, and a group that captures the value' % (name))
 
         if (branch := str(config.get('branch', '') or '').strip()) and not BRANCH_PATTERN.match(branch):

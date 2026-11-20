@@ -75,8 +75,8 @@ const WF_FIELDS = {
     ],
     COMMIT : [
         ['source',  'Source',  'Key of an SPSA, empty for @trigger'],
-        ['file',    'File',    'Path in the repository, e.g. src/Search.cs'],
-        ['pattern', 'Pattern', '\\b{name}\\b\\s*=\\s*(-?\\d+(?:\\.\\d+)?)'],
+        ['file',    'File',    'Fispur-Engine/src/Fispur/Fispur.Tune.cs'],
+        ['pattern', 'Pattern', 'Empty: [Tunable(value, ...)] or Name = value'],
         ['branch',  'Branch',  'openbench/tuned-wf<id>-<key>'],
         ['mode',    'Mode',    'pr or commit'],
         ['target',  'Target',  'main, for the pull request'],
@@ -90,9 +90,10 @@ const WF_MERGE_HELP =
 
 const WF_COMMIT_HELP =
     'Writes the values that an SPSA tuned into a file of the engine, on a branch that starts at the tuned commit, ' +
-    'and opens a pull request for it (pr), or only commits (commit). The pattern finds each value by the name ' +
-    'of its parameter: {name} stands for the name, and its first group is the value. The Bench changes with ' +
-    'the new values, so measure it before merging.';
+    'and opens a pull request for it (pr), or only commits (commit). By default, the values are written into the ' +
+    '[Tunable(value, min, max)] attributes of Fispur.Tune.cs, keeping their alignment. Another file or format needs ' +
+    'a pattern: {name} stands for the name, and its first group is the value. The Bench changes with the new ' +
+    'values, so measure it before merging.';
 
 const WF_TEMPLATE_HELP =
     'This is a Template: $branch stands for the branch that a push names, for example as Dev of the first SPRT. ' +
@@ -277,7 +278,7 @@ function wf_node_summary(key) {
     }
 
     else if (node.kind == 'COMMIT') {
-        lines.push('Values of ' + (wf_value(config, 'source') || '@trigger') + ' into ' + (wf_value(config, 'file') || '?'));
+        lines.push('Values of ' + (wf_value(config, 'source') || '@trigger') + ' into ' + (wf_value(config, 'file') || 'Fispur.Tune.cs').split('/').pop());
         lines.push((wf_value(config, 'mode') || 'pr') == 'pr' ? 'with a pull request' : 'as a commit');
     }
 
