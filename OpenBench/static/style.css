@@ -53,6 +53,7 @@ body, html, main{
     width: 100%;
     white-space: nowrap;
     display: inline-block;
+    color: var(--color-font1); /* Text without a colour of its own must never be dark on the dark page */
 }
 
 #sidebar ul {
