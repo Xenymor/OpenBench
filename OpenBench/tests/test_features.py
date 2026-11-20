@@ -260,8 +260,9 @@ class GraphActionTests(SimpleTestCase):
 class FakeGithub:
 
     # Records the writes of the action Nodes, and answers their reads
-    def __init__(self, heads=None, files=None):
+    def __init__(self, heads=None, files=None, branches=('main', 'dev', 'feature')):
         self.heads, self.files, self.calls = dict(heads or {}), dict(files or {}), []
+        self.branches = set(branches) | set(self.heads)
 
     def install(self, test):
         for name in ['commit', 'branch_exists', 'create_branch', 'fast_forward', 'merge', 'open_pull_request', 'read_file', 'write_file']:
@@ -274,11 +275,12 @@ class FakeGithub:
         return { 'sha' : sha, 'message' : 'Commit\n\nBench: 4242', 'date' : '2026-11-01T00:00:00Z' }
 
     def branch_exists(self, repo, engine, branch):
-        return branch in self.heads
+        return branch in self.branches
 
     def create_branch(self, repo, engine, branch, sha):
         self.calls.append(('create_branch', branch, sha))
         self.heads[branch] = sha
+        self.branches.add(branch)
 
     def fast_forward(self, repo, engine, branch, sha):
         self.calls.append(('fast_forward', branch, sha))
@@ -1093,3 +1095,92 @@ class PushCleanupTests(TestCase):
             automation.process_pushes()
 
         self.assertEqual(sorted(PushEvent.objects.values_list('delivery', flat=True)), ['new', 'recent'])
+
+@mock.patch('OpenBench.workloads.verify_workload.collect_github_info', TW.fake_github)
+@mock.patch('OpenBench.workloads.create_workload.run_checks', lambda workload, check_base=False: {})
+@mock.patch('OpenBench.workflows.runner.lookup_commit', TW.fake_commit)
+class ReviewTests(TestCase):
+
+    # Found by the review before merging
+
+    setUp       = TW.RunnerTests.setUp
+    defaults    = TW.RunnerTests.defaults
+    create      = TW.RunnerTests.create
+    nodes       = TW.RunnerTests.nodes
+    finish_sprt = TW.RunnerTests.finish_sprt
+
+    def test_an_open_pull_request_is_found_again(self):
+
+        # Github answers a second pull request with 422, keeping the reason in its errors
+        answers = [
+            SimpleNamespace(status_code=422, content=b'x', text='', json=lambda: {
+                'message' : 'Validation Failed', 'errors' : [{ 'message' : 'A pull request already exists for x:feature.' }] }),
+            SimpleNamespace(status_code=200, content=b'x', json=lambda: [{ 'html_url' : 'https://github.com/x/y/pull/7' }]),
+        ]
+        with mock.patch.object(github, 'write_headers', lambda engine, repo: {}), \
+             mock.patch.object(github.requests, 'request', lambda *args, **kwargs: answers.pop(0)):
+            self.assertEqual(github.open_pull_request('https://github.com/x/y', 'Fispur', 'feature', 'main', 't', 'b'),
+                             'https://github.com/x/y/pull/7')
+
+    def test_tags_are_no_heads_of_pull_requests(self):
+
+        fake = FakeGithub(); fake.install(self)
+        graph = { 'defaults' : {}, 'edges' : [ edge('stc', 'passed', 'merge') ], 'nodes' : {
+            'stc' : node('SPRT', dev='v2.1', base='main'), 'merge' : node('MERGE') } }
+        workflow = self.create(graph)
+        self.finish_sprt(self.nodes(workflow)['stc'].test, passed=True)
+        runner.step(workflow.id)
+
+        branch = 'openbench/wf%d-merge' % (workflow.id)
+        self.assertEqual(fake.calls[0][:2], ('create_branch', branch))
+        self.assertEqual(fake.calls[1][:2], ('pr', branch))
+
+    def test_restarted_tunes_are_no_longer_converged(self):
+
+        graph = { 'defaults' : {}, 'edges' : [], 'nodes' : { 'tune' : node('SPSA', dev='x', spsa_inputs='A, int, 10, 0, 100, 2, 0.002') } }
+        test  = self.nodes(self.create(graph))['tune'].test
+        test.spsa_run.converged_at = 20
+        test.spsa_run.save()
+        Test.objects.filter(id=test.id).update(finished=True, games=20)
+
+        self.client.force_login(self.user)
+        self.client.get('/tune/%d/RESTART/' % (test.id))
+        self.assertIsNone(Test.objects.get(id=test.id).spsa_run.converged_at)
+
+    def test_eta_of_a_tune_that_is_done_early(self):
+
+        graph = { 'defaults' : {}, 'edges' : [], 'nodes' : { 'tune' : node('SPSA', dev='x', at_percent='25',
+                  spsa_inputs='A, int, 10, 0, 100, 2, 0.002') } }
+        workflow = self.create(graph) # 2 * 2 * 10 = 40 games, done at 10
+        now = timezone.now()
+        Test.objects.filter(id=self.nodes(workflow)['tune'].test_id).update(games=4, rate_games=600.0, rate_time=3600.0, rate_updated=now)
+
+        times = WorkflowEta.estimate(workflow.graph, self.nodes(workflow), now)
+        self.assertAlmostEqual((times['tune']['finish'] - now).total_seconds(), 6 * 6.0, delta=1) # 6 games at 10 per minute
+
+    def test_changelog_ignores_edits_of_the_journal(self):
+
+        test = self.nodes(self.create({ 'defaults' : {}, 'edges' : [], 'nodes' : { 'a' : node('SPRT', dev='lmr', base='main') } }))['a'].test
+        Test.objects.filter(id=test.id).update(passed=True, finished=True)
+        machine = Machine.objects.create(user=self.user, secret='s', info={})
+        result  = Result.objects.create(test=test, machine=machine)
+        Result.objects.filter(id=result.id).update(updated=timezone.now() - datetime.timedelta(days=200))
+
+        self.client.force_login(self.user)
+        self.client.post('/test/%d/MODIFY/' % (test.id), { 'tags' : 'search', 'priority' : '0', 'throughput' : '1000' })
+
+        self.assertContains(self.client.get('/changelog/?engine=Fispur'), 'No SPRT passed in that time')
+        self.assertContains(self.client.get('/changelog/?engine=Fispur&since=2000-01-01'), '1 gainer')
+        self.assertContains(self.client.get('/changelog/?engine=Fispur&until=2026-02-30'), '2026-02-30 is no date')
+
+    def test_broken_error_limits_never_raise(self):
+        for limits in [{ 'crashes' : None }, { 'crashes' : '2.5' }, { 'crashes' : [] }, 'nonsense']:
+            with mock.patch.dict(OPENBENCH_CONFIG, { 'error_limits' : limits }):
+                found = error_watch.limits()
+                self.assertIn(found['crashes'], [0, 3], limits)
+                self.assertEqual(found['illegals'], 1)
+
+    def test_ladder_fields_are_bounded(self):
+        fake = FakeGithub(); fake.install(self)
+        errors = ladder.create_ladder(self.user, { 'name' : 'x', 'engine' : 'Fispur', 'branch' : 'b' * 200 })[1]
+        self.assertIn('The branch must have at most 128 characters, and the anchor at most 256', errors)

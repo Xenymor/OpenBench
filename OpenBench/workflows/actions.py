@@ -121,7 +121,8 @@ def merge(workflow, nodes, node, config):
     else:
         # A pull request needs a branch that points at exactly the tested commit. The branch the
         # engine came from may have moved on since, in which case one is made for the commit.
-        if not branch or github.commit(repo, name, branch)['sha'] != sha:
+        # Tags and short shas name the commit as well, but cannot be the head of a pull request.
+        if not branch or not github.branch_exists(repo, name, branch) or github.commit(repo, name, branch)['sha'] != sha:
             branch = 'openbench/wf%d-%s' % (workflow.id, node.key)
             if not github.branch_exists(repo, name, branch):
                 github.create_branch(repo, name, branch, sha)

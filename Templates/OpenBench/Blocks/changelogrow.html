@@ -1,5 +1,5 @@
 <tr>
-    <td>{{ row.test.updated|date:"Y-m-d" }}</td>
+    <td>{{ row.test.done|date:"Y-m-d" }}</td>
     <td><a href="/test/{{ row.test.id }}/">{{ row.test.dev.name }}</a></td>
     <td>{{ row.elo|floatformat:2 }} &plusmn; {{ row.error|floatformat:2 }}</td>
     <td>{{ row.test.dev_time_control }}</td>

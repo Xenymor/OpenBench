@@ -309,7 +309,9 @@ class NetworkBenchTests(TestCase):
 
         with mock.patch.object(verify_workload, 'resolve_commit', fake_commit('Bench: 1234')):
             self.assertEqual(self.client.get('/api/bench/', dict(params, network='DEFAULT1')).json()['message_bench'], 1234)
-            self.assertIsNone(self.client.get('/api/bench/', dict(params, network='OTHERNET')).json()['message_bench'])
+            # The commit's Bench is sent all the same, so the form can keep it for the default Network
+            answer = self.client.get('/api/bench/', dict(params, network='OTHERNET')).json()
+            self.assertEqual((answer['message_bench'], answer['message_applies']), (1234, False))
 
         # Looked up again by its sha, for another Network: the form must not reuse the cached Bench
         answer = self.client.get('/api/bench/', dict(params, network='OTHERNET', sha=SHA)).json()

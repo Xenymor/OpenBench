@@ -88,6 +88,12 @@ def duration(graph, key, cache):
 
     return cache[(node['kind'], control, games)]
 
+def spsa_target(graph, key, test):
+    # The games after which a Workflow counts a tune as done, see runner.spsa_games_needed()
+    try: percent = float(graph['nodes'][key].get('config', {}).get('at_percent') or 100)
+    except ValueError: percent = 100.0
+    return 2 * test.spsa_run.pairs_per * test.spsa_run.iterations * percent / 100.0
+
 def estimate(graph, nodes, now):
 
     # nodes maps keys to WorkflowNodes, with their Tests
@@ -116,7 +122,8 @@ def estimate(graph, nodes, now):
             continue
 
         if node.state == 'RUNNING':
-            seconds = OpenBench.eta.remaining_seconds(node.test, now) if node.test else None
+            target  = spsa_target(graph, key, node.test) if kind == 'SPSA' and node.test else None
+            seconds = OpenBench.eta.remaining_seconds(node.test, now, target) if node.test else None
             times[key] = { 'start' : node.started, 'finish' : now + datetime.timedelta(seconds=seconds) if seconds is not None else None }
             continue
 

@@ -45,8 +45,18 @@ DEFAULT_LIMITS = {
 COUNTERS = ['crashes', 'timelosses', 'illegals']
 
 def limits():
+
+    # Runs for every report of every worker, so a broken config must never raise: null disables
+    # a limit, as 0 does, and a value that is no number keeps the default
     configured = (OpenBench.config.OPENBENCH_CONFIG or {}).get('error_limits') or {}
-    return { key : type(value)(configured.get(key, value)) for key, value in DEFAULT_LIMITS.items() }
+    found      = {}
+
+    for key, default in DEFAULT_LIMITS.items():
+        value = configured.get(key, default) if isinstance(configured, dict) else default
+        try: found[key] = type(default)(0 if value is None else value)
+        except (TypeError, ValueError): found[key] = default
+
+    return found
 
 def baseline(test):
     stored = test.error_baseline or {}

@@ -38,8 +38,9 @@ MIN_LLR   = 0.15 # Below which the direction of an SPRT is anyone's guess
 MAX_RATIO = 50   # Estimates beyond this many times the games so far are no estimates
 HISTORY   = 30   # Finished Workloads looked at for typical_seconds()
 
-def remaining_games(test):
+def remaining_games(test, target=None):
 
+    # target replaces the planned games of a tune, as for a Workflow Node that is done earlier
     if test.finished:
         return 0
 
@@ -57,13 +58,13 @@ def remaining_games(test):
 
     if test.test_mode == 'SPSA':
         run = test.spsa_run
-        return max(0, 2 * run.pairs_per * run.iterations - test.games)
+        return max(0, int(target if target is not None else 2 * run.pairs_per * run.iterations) - test.games)
 
     return None
 
-def remaining_seconds(test, now):
+def remaining_seconds(test, now, target=None):
 
-    games = remaining_games(test)
+    games = remaining_games(test, target)
     rate  = test.games_per_minute(now)
 
     if games is None or not rate:

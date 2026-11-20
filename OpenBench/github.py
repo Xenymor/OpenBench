@@ -102,9 +102,16 @@ def request(method, url, headers, payload=None, expected=(200, 201)):
         raise GithubError('Github could not be reached: %s' % (error))
 
     if response.status_code not in expected:
-        try: message = response.json().get('message', '')
-        except Exception: message = response.text[:200]
-        raise GithubError('Github answered %d: %s' % (response.status_code, message))
+
+        # A 422 says 'Validation Failed', and keeps what failed in its errors
+        try:
+            data    = response.json()
+            details = [str(error.get('message') or error.get('code') or '') for error in data.get('errors') or [] if isinstance(error, dict)]
+            message = '; '.join([data.get('message', '')] + [detail for detail in details if detail])
+        except Exception:
+            message = response.text[:200]
+
+        raise GithubError('Github answered %d: %s' % (response.status_code, message[:500]))
 
     if response.status_code == 204 or not response.content:
         return { 'status' : response.status_code }
@@ -167,15 +174,16 @@ def open_pull_request(repo, engine, head, base, title, body):
         return data['html_url']
 
     except GithubError as error:
-        if 'already exists' not in str(error):
+        if 'already exists' not in str(error) and 'answered 422' not in str(error):
             raise
+        failure = error
 
     owner = normalize_repo(repo).split('/')[3]
     query = urllib.parse.urlencode({ 'state' : 'open', 'head' : '%s:%s' % (owner, quote_ref(head) and head) })
     found = request('GET', url + '?' + query, write_headers(engine, repo))
     if isinstance(found, list) and found:
         return found[0]['html_url']
-    raise GithubError('A pull request for %s already exists, but could not be found' % (head))
+    raise failure
 
 def read_file(repo, engine, path, ref):
 

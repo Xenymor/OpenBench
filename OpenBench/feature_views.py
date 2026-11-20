@@ -30,6 +30,8 @@ import datetime
 import json
 import re
 
+from django.db.models import Max
+from django.db.models.functions import Coalesce
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -168,15 +170,16 @@ def parse_since(engine, value, errors):
 
 def changelog_rows(engine, base, since, until=None):
 
-    # Passed SPRTs against the base branch, oldest first: gainers, and simplifications
-    tests = Test.objects.filter(test_mode='SPRT', passed=True, deleted=False, dev_engine=engine,
-                                base__name=base, updated__gte=since).select_related('dev', 'base')
+    # Passed SPRTs against the base branch, oldest first: gainers, and simplifications. They are
+    # placed by the time of their last result, since Test.updated changes with every edit of a Test.
+    tests = Test.objects.filter(test_mode='SPRT', passed=True, deleted=False, dev_engine=engine, base__name=base)
+    tests = tests.annotate(done=Coalesce(Max('test__updated'), 'updated')).filter(done__gte=since).select_related('dev', 'base')
     if until:
-        tests = tests.filter(updated__lt=until)
+        tests = tests.filter(done__lt=until)
 
     gainers, simplifications = [], []
 
-    for test in tests.order_by('updated', 'id'):
+    for test in tests.order_by('done', 'id'):
 
         lower, elo, upper = OpenBench.stats.Elo(test.results())
         row = {
@@ -217,7 +220,8 @@ def changelog(request):
     since = parse_since(engine, request.GET.get('since', ''), errors)
     until = None
     if DATE_PATTERN.match(request.GET.get('until', '').strip()):
-        until = datetime.datetime.strptime(request.GET['until'].strip(), '%Y-%m-%d').replace(tzinfo=datetime.timezone.utc) + datetime.timedelta(days=1)
+        try: until = datetime.datetime.strptime(request.GET['until'].strip(), '%Y-%m-%d').replace(tzinfo=datetime.timezone.utc) + datetime.timedelta(days=1)
+        except ValueError: errors.append('%s is no date' % (request.GET['until'].strip()))
 
     gainers, simplifications = changelog_rows(engine, base, since, until)
 

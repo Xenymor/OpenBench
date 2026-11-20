@@ -100,6 +100,11 @@ def restart_workload(request, profile, workload):
     workload.finished = False;
     workload.rate_updated = None # Time spent stopped should not count towards the throughput
     OpenBench.error_watch.reset_baseline(workload) # The error limits count from the restart on
+
+    # A tune that stopped as converged keeps tuning, and may converge again later
+    if workload.test_mode == 'SPSA' and workload.spsa_run.converged_at is not None:
+        workload.spsa_run.converged_at = None
+        workload.spsa_run.save(update_fields=['converged_at'])
     return 'Workload was Restarted!'
 
 def rebench_workload(request, profile, workload):

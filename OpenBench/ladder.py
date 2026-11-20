@@ -116,6 +116,9 @@ def create_ladder(user, fields):
     if not name or len(name) > 128:
         errors.append('A Ladder needs a name of at most 128 characters')
 
+    if not branch or len(branch) > 128 or len(anchor) > 256:
+        errors.append('The branch must have at most 128 characters, and the anchor at most 256')
+
     if not config:
         errors.append('Unknown Engine')
 

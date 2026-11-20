@@ -643,9 +643,8 @@ def lookup_bench(engine, repo, branch, network, sha=''):
         return { 'error' : errors[0] }
 
     _, sha, message = commit
-    applies = message_applies(engine, network)
-    return { 'sha' : sha, 'known' : known_dict(sha), 'message_bench' : message_bench(message) if applies else None,
-             'message_applies' : applies }
+    return { 'sha' : sha, 'known' : known_dict(sha), 'message_bench' : message_bench(message),
+             'message_applies' : message_applies(engine, network) }
 
 def strip_message(message):
     lines = message.strip().split("\n")
