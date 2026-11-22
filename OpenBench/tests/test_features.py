@@ -718,9 +718,10 @@ SECRET = 'top-secret'
 def signed(body, secret=SECRET):
     return 'sha256=' + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
-def push_payload(branch='feature', message='Try LMR [ob]', repo='https://github.com/Xenymor/Fispur', sha='a' * 40):
+def push_payload(branch='feature', message='Try LMR [ob]', repo='https://github.com/Xenymor/Fispur', sha='a' * 40, new=True):
     return json.dumps({ 'ref' : 'refs/heads/%s' % (branch), 'after' : sha, 'deleted' : False,
-                        'repository' : { 'html_url' : repo }, 'head_commit' : { 'message' : message } }).encode()
+                        'repository' : { 'html_url' : repo }, 'head_commit' : { 'message' : message },
+                        'commits' : [] if new is False else [{ 'message' : message }] }).encode()
 
 class AutomationUnitTests(SimpleTestCase):
 
@@ -778,6 +779,12 @@ class AutomationTests(TestCase):
         event = PushEvent.objects.get()
         self.assertEqual((event.branch, event.repo, event.sha, event.processed), ('feature', 'https://github.com/Xenymor/Fispur', 'a' * 40, False))
 
+        # Branches for commits that exist already, as MERGE and COMMIT Nodes make them, start nothing,
+        # even though Github repeats the message of their commit, marker and all
+        self.assertIn('No new commits', self.post_push(push_payload(branch='copy', new=False), delivery='d5').json()['ignored'])
+        self.assertIn('No new commits', self.post_push(push_payload(branch='openbench/wf1-merge'), delivery='d6').json()['ignored'])
+        self.assertEqual(PushEvent.objects.count(), 1)
+
         with mock.patch.object(automation, 'read_secret', lambda: None):
             self.assertEqual(self.client.post('/api/github/push/', body, content_type='application/json').status_code, 404)
 
@@ -816,6 +823,13 @@ class AutomationTests(TestCase):
         self.assertEqual(results, ['No markers', 'No enabled Template "ltc"', 'Template other is for another repository', 'No enabled Template "nope"'])
         self.assertEqual(Workflow.objects.count(), 0)
         self.assertEqual(len(sent), 2) # The unknown Templates need attention
+
+    def test_templates_never_test_a_branch_against_itself(self):
+
+        self.template()
+        workflow, errors = automation.start_template(WorkflowTemplate.objects.get(), 'main')
+        self.assertIsNone(workflow)
+        self.assertEqual(errors, ['Template default would test main against itself (stc)'])
 
     def test_failing_templates_are_announced(self):
 

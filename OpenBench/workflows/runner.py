@@ -604,6 +604,7 @@ def observe(workflow, node):
     elif node.kind == 'SPSA' and (test.games >= spsa_games_needed(workflow, node) or converged(test)):
         node.tuned = OpenBench.spsa_utils.spsa_tuned_options(test)
         finish(node, 'done')
+        stop_finished_tune(workflow, node, test)
 
     elif test.finished:
         node.state = State.STOPPED
@@ -614,6 +615,20 @@ def observe(workflow, node):
         node.state, node.error = State.RUNNING, ''
 
     return before != (node.state, node.outcome, node.error)
+
+def stop_finished_tune(workflow, node, test):
+
+    # A tune that is done at its "Done at %" would otherwise play on to its full length, for
+    # values that the Workflow has frozen already. Stopped right away, so the workers move on.
+    if test.finished:
+        return
+
+    Test.objects.filter(id=test.id).update(finished=True)
+    test.finished = True
+
+    percent = float(workflow.graph['nodes'][node.key].get('config', {}).get('at_percent') or 100)
+    summary = 'STOP Workflow #%d done at %g%%' % (workflow.id, percent)
+    LogEvent.objects.create(author=workflow.author, summary=summary[:128], log_file='', test_id=test.id)
 
 def stop_reason(test):
 

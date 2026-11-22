@@ -581,7 +581,7 @@ class RunnerTests(TestCase):
         workflow = self.create(graph)
         tune     = self.nodes(workflow)['tune'].test
 
-        # Done at 50%, while the tune keeps running
+        # Done at 50%, which stops the tune, since the rest of it is no longer needed
         tune.games = 20
         tune.save()
         tune.spsa_run.parameters.update(value=13.4)
@@ -590,6 +590,12 @@ class RunnerTests(TestCase):
         nodes = self.nodes(workflow)
         sprt  = nodes['sprt'].test
         self.assertEqual(nodes['tune'].tuned, 'A=13')
+        self.assertTrue(Test.objects.get(id=tune.id).finished)
+        self.assertTrue(LogEvent.objects.filter(test_id=tune.id, summary='STOP Workflow #%d done at 50%%' % (workflow.id)).exists())
+
+        # The node keeps its result, and the next steps leave the stopped tune alone
+        runner.step(workflow.id)
+        self.assertEqual((self.nodes(workflow)['tune'].state, self.nodes(workflow)['tune'].outcome), ('FINISHED', 'done'))
         self.assertEqual(sprt.dev_options, 'Threads=1 Hash=16 A=13')
         self.assertEqual(sprt.base_options, 'Threads=1 Hash=8')
         self.assertEqual(sprt.dev_time_control, '60.0+0.60')

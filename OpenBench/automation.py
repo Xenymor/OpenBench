@@ -27,7 +27,8 @@
 #   [ob:ltc]       the Template named 'ltc'
 #
 # Only the message of the newest commit of a push counts, so that rebasing a branch
-# with an old marker in it starts nothing. Github announces pushes through a webhook:
+# with an old marker in it starts nothing. Pushes without new commits, like a new branch
+# for a commit that exists already, start nothing either. Github announces pushes through a webhook:
 #
 #   Payload URL    https://<your site>/api/github/push/
 #   Content type   application/json
@@ -61,6 +62,7 @@ MARKER_PATTERN = re.compile(r'\[ob(?::([A-Za-z0-9_.-]{1,64}))?\]', re.IGNORECASE
 NAME_PATTERN   = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
 PLACEHOLDER    = '$branch'
 DEFAULT_NAME   = 'default'
+OWN_BRANCHES   = 'openbench/' # Prefix of the branches that the MERGE and COMMIT Nodes make
 KEEP_DAYS      = 90 # Processed pushes are kept this long, to be looked at on the Templates page
 
 def read_secret(path=None):
@@ -102,6 +104,12 @@ def receive(headers, body):
     ref = str(data.get('ref', ''))
     if not ref.startswith('refs/heads/') or data.get('deleted') or not data.get('head_commit'):
         return 200, { 'ignored' : ref }
+
+    # Only new commits count. A branch made for a commit that exists already, as the MERGE and
+    # COMMIT Nodes make them, repeats that commit's message, and its marker would start the
+    # Template again, for the new branch, which would make a branch of its own, and so on.
+    if not data.get('commits') or ref.startswith('refs/heads/%s' % (OWN_BRANCHES)):
+        return 200, { 'ignored' : 'No new commits on %s' % (ref) }
 
     repo     = github.normalize_repo((data.get('repository') or {}).get('html_url', ''))
     delivery = str(headers.get('X-GitHub-Delivery', '') or data.get('after', ''))[:64]
@@ -145,8 +153,15 @@ def start_template(template, branch):
     if not (user := User.objects.filter(username=template.author).first()):
         return None, ['The author of Template %s no longer exists' % (template.name)]
 
+    # A marker that reaches the branch the Template tests against, for example through the
+    # message of a merge, would test that branch against itself, which can never tell anything
+    graph = instantiate(template, branch)
+    if same := [key for key, node in graph['nodes'].items() if node.get('kind') == 'SPRT'
+                and str(node.get('config', {}).get('dev', '')).strip() == str(node.get('config', {}).get('base', '')).strip()]:
+        return None, ['Template %s would test %s against itself (%s)' % (template.name, branch, ', '.join(sorted(same)))]
+
     name = ('%s: %s' % (template.name, branch))[:128]
-    return runner.create_workflow(user, name, instantiate(template, branch))
+    return runner.create_workflow(user, name, graph)
 
 def handle(event):
 
