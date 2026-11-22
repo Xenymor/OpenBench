@@ -350,6 +350,8 @@ function wf_render_node(key) {
         let text = live.state + (live.outcome ? ': ' + live.outcome : '');
         if (live.test && live.state == 'RUNNING' && !live.test.approved)
             text += ' (awaiting approval)';
+        if (live.held)
+            text += ' (paused)';
         body.append(wf_el('div', 'wf-node-state', text));
 
         if (live.test) {

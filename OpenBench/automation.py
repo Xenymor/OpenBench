@@ -161,7 +161,21 @@ def start_template(template, branch):
         return None, ['Template %s would test %s against itself (%s)' % (template.name, branch, ', '.join(sorted(same)))]
 
     name = ('%s: %s' % (template.name, branch))[:128]
-    return runner.create_workflow(user, name, graph)
+    workflow, errors = runner.create_workflow(user, name, graph)
+
+    if errors:
+        return None, errors
+
+    # Only the newest one runs: the older Workflows of the Template for the branch are aborted,
+    # which stops their Tests. Only once the new one exists, so that a failed push loses nothing.
+    from OpenBench.models import Workflow
+    Workflow.objects.filter(id=workflow.id).update(template=template.name, branch=branch[:256])
+    older = Workflow.objects.filter(template=template.name, branch=branch[:256]).exclude(id=workflow.id)
+    for previous in older.exclude(status__in=[Workflow.Status.FINISHED, Workflow.Status.ABORTED]):
+        runner.abort(previous.id, 'OpenBench')
+        workflow.replaced = getattr(workflow, 'replaced', []) + [previous.id]
+
+    return workflow, None
 
 def handle(event):
 
@@ -193,9 +207,12 @@ def handle(event):
                                    errors[:10], '/workflow/templates/')
 
         else:
-            results.append('Started Workflow #%d' % (workflow.id))
+            replaced = getattr(workflow, 'replaced', [])
+            results.append('Started Workflow #%d' % (workflow.id) + (', replacing #%s' % (', #'.join(map(str, replaced))) if replaced else ''))
             notifications.announce('done', 'Push of %s started Workflow #%d' % (event.branch, workflow.id),
-                                   ['%s, from Template %s' % (workflow.name, template.name)], '/workflow/%d/' % (workflow.id))
+                                   ['%s, from Template %s' % (workflow.name, template.name)]
+                                   + (['Replaces Workflow #%s, which was aborted' % (', #'.join(map(str, replaced)))] if replaced else []),
+                                   '/workflow/%d/' % (workflow.id))
 
     return '; '.join(results) or 'No markers'
 

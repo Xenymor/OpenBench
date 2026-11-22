@@ -221,8 +221,8 @@ def modify_workflow(request, workflow, action):
     key = request.POST.get('key', '')
 
     try:
-        if   action == 'pause'   : runner.set_paused(workflow.id, True)
-        elif action == 'resume'  : runner.set_paused(workflow.id, False)
+        if   action == 'pause'   : runner.set_paused(workflow.id, True, request.user.username)
+        elif action == 'resume'  : runner.set_paused(workflow.id, False, request.user.username)
         elif action == 'abort'   : runner.abort(workflow.id, request.user.username)
         elif action == 'retry'   : runner.retry(workflow.id, key)
         elif action == 'resolve' : runner.resolve(workflow.id, key, request.POST.get('outcome', ''))
@@ -244,7 +244,7 @@ def workflow_state(workflow):
     rows  = { node.key : node for node in workflow.nodes.select_related('test', 'test__spsa_run', 'test__dev', 'test__base') }
 
     # When each Node will start and finish, at the earliest, see OpenBench/workflows/eta.py
-    try: times = eta.estimate(workflow.graph, rows, timezone.now()) if not workflow.is_final() else {}
+    try: times = eta.estimate(workflow.graph, rows, timezone.now()) if not workflow.is_final() and not workflow.paused else {}
     except Exception:
         traceback.print_exc()
         times = {}
@@ -252,6 +252,7 @@ def workflow_state(workflow):
     for node in rows.values():
         nodes[node.key] = {
             'state'   : node.state,
+            'held'    : node.held,
             'outcome' : node.outcome,
             'error'   : node.error,
             'trigger' : node.trigger,

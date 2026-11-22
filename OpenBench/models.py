@@ -447,6 +447,10 @@ class Workflow(Model):
     author  = CharField(max_length=64)
     name    = CharField(max_length=128)
     status  = CharField(max_length=16, choices=Status.choices, default=Status.RUNNING, db_index=True)
+
+    # Set for Workflows started from a Template, so that a newer push of the branch replaces them
+    template = CharField(max_length=64, default='', blank=True)
+    branch   = CharField(max_length=256, default='', blank=True)
     paused  = BooleanField(default=False)
     created = DateTimeField(auto_now_add=True)
     updated = DateTimeField(auto_now=True)
@@ -480,6 +484,7 @@ class WorkflowNode(Model):
     tuned    = CharField(max_length=2048, blank=True) # SPSA values, frozen when the Node finished
     detail   = CharField(max_length=256, blank=True)  # IF, the result its condition was evaluated on
     pinned   = JSONField(default=dict, blank=True)    # { side : sha } of engines given by a branch, see runner.pin_commits()
+    held     = BooleanField(default=False)            # Its Test was stopped by pausing the Workflow, and resumes with it
     error    = CharField(max_length=1024, blank=True)
     started  = DateTimeField(null=True, blank=True)
     finished = DateTimeField(null=True, blank=True)

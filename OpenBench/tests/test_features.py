@@ -37,7 +37,7 @@ import OpenBench.utils
 
 from OpenBench import error_watch, github, ladder, spsa_history
 from OpenBench.config import OPENBENCH_CONFIG
-from OpenBench.models import Book, Engine, EngineConfig, Ladder, LadderPoint, Machine, Profile, Result
+from OpenBench.models import Book, Engine, EngineConfig, Ladder, LadderPoint, LogEvent, Machine, Profile, Result
 from OpenBench.models import ServerState, SPSASnapshot, Test, WorkflowNode
 from OpenBench.tests import test_workflows as TW
 from OpenBench.workflows import actions, notifications, runner
@@ -1282,3 +1282,120 @@ class PassChancePageTests(TestCase):
         # Not once it is decided
         Test.objects.filter(id=test.id).update(finished=True, passed=True)
         self.assertNotContains(self.client.get('/test/%d/' % (test.id)), 'Pass Chance')
+
+@mock.patch('OpenBench.workloads.verify_workload.collect_github_info', TW.fake_github)
+@mock.patch('OpenBench.workloads.create_workload.run_checks', lambda workload, check_base=False: {})
+@mock.patch('OpenBench.workflows.runner.lookup_commit', TW.fake_commit)
+class PauseAndReplaceTests(TestCase):
+
+    setUp       = TW.RunnerTests.setUp
+    defaults    = TW.RunnerTests.defaults
+    create      = TW.RunnerTests.create
+    nodes       = TW.RunnerTests.nodes
+    finish_sprt = TW.RunnerTests.finish_sprt
+
+    def graph(self):
+        return { 'defaults' : {}, 'edges' : [ edge('a', 'passed', 'b') ], 'nodes' : {
+            'a' : node('SPRT', dev='lmr', base='main'), 'b' : node('SPRT', dev='@trigger.dev', base='main') } }
+
+    def test_pause_holds_running_tests_quietly_and_resume_continues_them(self):
+
+        workflow = self.create(self.graph())
+        test     = self.nodes(workflow)['a'].test
+        Test.objects.filter(id=test.id).update(rate_updated=timezone.now(), rate_games=10.0, rate_time=600.0)
+
+        self.client.force_login(self.user)
+        sent = []
+        with mock.patch.object(notifications, 'send', lambda build: sent.extend(build(''))), \
+             self.captureOnCommitCallbacks(execute=True):
+            self.client.post('/workflow/%d/pause/' % (workflow.id))
+            runner.step(workflow.id)
+
+        nodes = self.nodes(workflow)
+        self.assertTrue(Test.objects.get(id=test.id).finished)          # Workers move on
+        self.assertEqual((nodes['a'].state, nodes['a'].held), ('RUNNING', True))
+        self.assertEqual(Workflow.objects.get(id=workflow.id).status, 'PAUSED')
+        self.assertEqual(sent, [])                                      # Nothing is announced
+        self.assertContains(self.client.get('/test/%d/' % (test.id)), 'Paused with Workflow #%d' % (workflow.id))
+        self.assertTrue(self.client.get('/workflow/%d/state/' % (workflow.id)).json()['nodes']['a']['held'])
+
+        self.client.post('/workflow/%d/resume/' % (workflow.id))
+        nodes, test = self.nodes(workflow), Test.objects.get(id=test.id)
+        self.assertEqual((test.finished, test.rate_updated, nodes['a'].held, nodes['a'].state), (False, None, False, 'RUNNING'))
+        self.assertEqual(Workflow.objects.get(id=workflow.id).status, 'RUNNING')
+        self.assertEqual(list(LogEvent.objects.filter(test_id=test.id).values_list('summary', flat=True).order_by('id'))[-2:],
+                         ['PAUSE Workflow #%d' % (workflow.id), 'RESUME Workflow #%d' % (workflow.id)])
+
+        # The Workflow goes on as before
+        self.finish_sprt(test, passed=True)
+        runner.step(workflow.id)
+        self.assertEqual(self.nodes(workflow)['b'].state, 'RUNNING')
+
+    def test_aborting_a_paused_workflow_keeps_its_tests_stopped(self):
+
+        workflow = self.create(self.graph())
+        runner.set_paused(workflow.id, True)
+        runner.abort(workflow.id, 'Xenymor')
+        node = self.nodes(workflow)['a']
+        self.assertFalse(node.held)
+        self.assertTrue(node.test.finished)
+
+    def test_a_decided_node_warns_about_restarting_its_test(self):
+
+        workflow = self.create({ 'defaults' : {}, 'edges' : [], 'nodes' : { 'tune' : node('SPSA', dev='x', at_percent='50',
+                                 spsa_inputs='A, int, 10, 0, 100, 2, 0.002') } })
+        test = self.nodes(workflow)['tune'].test
+        Test.objects.filter(id=test.id).update(games=20)
+        runner.step(workflow.id)
+
+        self.client.force_login(self.user)
+        page = self.client.get('/tune/%d/' % (test.id))
+        self.assertContains(page, 'is decided already (done), so the Workflow ignores this Test from now on')
+        self.assertContains(page, 'onclick="return confirm(')
+
+    def test_a_newer_push_replaces_the_workflow_of_the_branch(self):
+
+        template = WorkflowTemplate.objects.create(name='default', author=self.user.username,
+                       graph={ 'defaults' : self.defaults(), 'edges' : [], 'nodes' : { 'a' : node('SPRT', dev='$branch', base='main') } })
+
+        first, errors = automation.start_template(template, 'lmr')
+        other, errors = automation.start_template(template, 'other')
+        second, errors = automation.start_template(template, 'lmr')
+
+        self.assertEqual(Workflow.objects.get(id=first.id).status, 'ABORTED')
+        self.assertTrue(self.nodes(first)['a'].test.finished)
+        self.assertEqual(second.replaced, [first.id])
+        self.assertEqual(Workflow.objects.get(id=other.id).status, 'RUNNING')   # Another branch stays
+        self.assertEqual(Workflow.objects.get(id=second.id).status, 'RUNNING')
+
+        # A push that fails leaves the running one alone
+        failed, errors = automation.start_template(template, 'missing')
+        self.assertIsNone(failed)
+        self.assertEqual(Workflow.objects.get(id=second.id).status, 'RUNNING')
+
+        # The push announces what it replaced
+        PushEvent.objects.create(delivery='p', repo='https://github.com/Xenymor/Fispur', branch='lmr', sha='s', message='[ob]')
+        sent = []
+        with mock.patch.object(notifications, 'send', lambda build: sent.extend(build(''))), \
+             mock.patch.object(automation.ladder, 'request_poll'):
+            automation.process_pushes()
+        self.assertIn(', replacing #%d' % (second.id), PushEvent.objects.get(delivery='p').result)
+        self.assertIn('Replaces Workflow #%d, which was aborted' % (second.id), sent[0]['embeds'][0]['description'])
+
+    def test_ladder_points_stopped_early_are_marked(self):
+
+        fake = FakeGithub(heads={ 'main' : TW.fake_sha('anchor') }); fake.install(self)
+        created, errors = ladder.create_ladder(self.user, { 'name' : 'Main', 'engine' : 'Fispur', 'games' : '1000' })
+        fake.heads['main'] = TW.fake_sha('newer')
+        point = ladder.measure(created)
+
+        Test.objects.filter(id=point.test_id).update(games=300, finished=True)
+        self.assertTrue(ladder.points(created)[0]['stopped'])
+        Test.objects.filter(id=point.test_id).update(games=1000)
+        self.assertFalse(ladder.points(created)[0]['stopped'])
+        Test.objects.filter(id=point.test_id).update(games=300, finished=False)
+        self.assertFalse(ladder.points(created)[0]['stopped']) # Still running
+
+        Test.objects.filter(id=point.test_id).update(finished=True)
+        self.client.force_login(self.user)
+        self.assertContains(self.client.get('/ladder/%d/' % (created.id)), 'stopped early')

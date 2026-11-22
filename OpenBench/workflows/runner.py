@@ -588,6 +588,10 @@ def observe(workflow, node):
     if node.state not in [State.RUNNING, State.STOPPED]:
         return False
 
+    # Held by the pause of the Workflow: stopped on purpose, so it needs no attention
+    if node.held:
+        return False
+
     before = (node.state, node.outcome, node.error)
     test   = node.test
 
@@ -893,16 +897,42 @@ def collect_events(workflow, nodes, states, status):
 #                           ACTIONS FROM THE USERS                            #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-def set_paused(workflow_id, paused):
+def set_paused(workflow_id, paused, username='OpenBench'):
 
+    # Pausing holds the Tests that run, so that the workers move on to other Workloads, and
+    # resuming continues them. Nothing is announced, and held Nodes stay RUNNING meanwhile.
     with transaction.atomic():
         workflow = Workflow.objects.select_for_update().get(id=workflow_id)
         workflow.paused = paused
         workflow.save()
 
+        if paused:
+            hold_tests(workflow, username)
+        else:
+            release_tests(workflow, username)
+
     return step(workflow_id)
 
+def hold_tests(workflow, username):
+    for node in workflow.nodes.filter(state=State.RUNNING, held=False).select_related('test'):
+        if node.test and not node.test.finished:
+            Test.objects.filter(id=node.test.id).update(finished=True)
+            node.held = True
+            node.save(update_fields=['held'])
+            LogEvent.objects.create(author=username, summary='PAUSE Workflow #%d' % (workflow.id), log_file='', test_id=node.test.id)
+
+def release_tests(workflow, username):
+    for node in workflow.nodes.filter(held=True).select_related('test'):
+        node.held = False
+        node.save(update_fields=['held'])
+
+        # Unless decided or deleted meanwhile. The time it was held does not count towards its speed.
+        if node.test and not (node.test.passed or node.test.failed or node.test.deleted):
+            Test.objects.filter(id=node.test.id).update(finished=False, rate_updated=None)
+            LogEvent.objects.create(author=username, summary='RESUME Workflow #%d' % (workflow.id), log_file='', test_id=node.test.id)
+
 def stop_tests(workflow, username):
+    workflow.nodes.filter(held=True).update(held=False) # Held Tests are stopped already, and stay so
     for node in workflow.nodes.filter(state=State.RUNNING).select_related('test'):
         if node.test and not node.test.finished:
             node.test.finished = True

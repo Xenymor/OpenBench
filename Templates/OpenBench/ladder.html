@@ -14,18 +14,24 @@
     <script>
         document.addEventListener('DOMContentLoaded', function () {
 
-            // Elo against another anchor is not comparable, so only the current anchor makes up the line
-            const points = JSON.parse(document.getElementById('json-points').textContent).filter(point => 'elo' in point && point.current);
+            // Elo against another anchor is not comparable, so only the current anchor makes up the line.
+            // Tests that were stopped early measured too few games, and are only marked, apart from the line.
+            const all     = JSON.parse(document.getElementById('json-points').textContent).filter(point => 'elo' in point && point.current);
+            const points  = all.filter(point => !point.stopped);
+            const stopped = all.filter(point => point.stopped);
             const time   = point => new Date(point.created).getTime();
             const label  = point => point.sha.slice(0, 8) + ' ' + point.label + ': ' + point.elo.toFixed(2)
                                   + ' ± ' + ((point.upper - point.lower) / 2).toFixed(2) + ' Elo, ' + point.games + ' games'
-                                  + (point.finished ? '' : ' (running)');
+                                  + (point.stopped ? ' (stopped early, of ' + point.max_games + ')' : point.finished ? '' : ' (running)');
 
             ob_chart(document.getElementById('ladder-chart'), {
                 series   : [{ name : 'Elo against the anchor', width : 2, dots : true,
                               points : points.map(point => [time(point), point.elo]),
                               errors : points.map(point => [point.lower, point.upper]),
-                              labels : points.map(label) }],
+                              labels : points.map(label) },
+                            { name : 'Stopped early', color : '#FA9696', dots : true, line : false,
+                              points : stopped.map(point => [time(point), point.elo]),
+                              labels : stopped.map(label) }],
                 x_format : x => new Date(x).toLocaleDateString(),
                 y_label  : 'Elo against the anchor',
                 zero     : true,
@@ -86,7 +92,7 @@
                 <td><a href="{{ ladder.repo }}/commit/{{ point.sha }}">{{ point.sha|slice:":8" }}</a></td>
                 <td>{{ point.label }}</td>
                 <td>{% if 'elo' in point %}{{ point.elo|floatformat:2 }} [{{ point.lower|floatformat:2 }}, {{ point.upper|floatformat:2 }}]{% elif point.error %}<span style="color: #FA9696; white-space: normal;">{{ point.error|truncatechars:120 }}</span>{% else %}-{% endif %}</td>
-                <td>{% if 'elo' in point %}{{ point.games }} / {{ point.max_games }}{% endif %}</td>
+                <td>{% if 'elo' in point %}{{ point.games }} / {{ point.max_games }}{% if point.stopped %} <span style="color: #FA9696;">stopped early</span>{% endif %}{% endif %}</td>
                 <td>{% if point.test %}<a href="/test/{{ point.test }}/">#{{ point.test }}</a>{% endif %}</td>
                 <td>{% if point.current %}current{% else %}{{ point.anchor|slice:":8"|default:"?" }}{% endif %}</td>
             </tr>

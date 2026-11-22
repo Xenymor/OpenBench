@@ -26,6 +26,9 @@
     {% if workload.stop_reason and workload.finished %}
         <div class="error-message"><pre>{{workload.stop_reason}}</pre></div>
     {% endif %}
+    {% if workflow_hint %}
+        <div class="warning-message"><pre style="white-space: normal;">{{workflow_hint}}</pre></div>
+    {% endif %}
     {% if warnings %}
         <div class="warning-message"><pre>{% for warning in warnings %}{{warning}}{% if not forloop.last %}<br>{% endif %}{% endfor %}</pre></div>
     {% endif %}
@@ -128,9 +131,9 @@
 
             <!-- Restart Button: For Approvers or Workload Authors of finished workloads -->
             {% if workload.finished and not workload.passed and not workload.failed and profile.approver %}
-                <a class="anchorbutton btn-yellow" href="/{{type|lower}}/{{workload.id}}/RESTART">Restart</a>
+                <a class="anchorbutton btn-yellow" href="/{{type|lower}}/{{workload.id}}/RESTART"{% if workflow_hint %} onclick="return confirm('{{workflow_hint|escapejs}}');"{% endif %}>Restart</a>
             {% elif workload.finished and not workload.passed and not workload.failed and profile.user.username == workload.author %}
-                <a class="anchorbutton btn-yellow" href="/{{type|lower}}/{{workload.id}}/RESTART">Restart</a>
+                <a class="anchorbutton btn-yellow" href="/{{type|lower}}/{{workload.id}}/RESTART"{% if workflow_hint %} onclick="return confirm('{{workflow_hint|escapejs}}');"{% endif %}>Restart</a>
             {% elif workload.finished %}
                 <a class="anchorbutton btn-disabled">Restart</a>
             {% endif %}

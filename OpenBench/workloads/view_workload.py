@@ -57,6 +57,14 @@ def view_workload(request, workload, workload_type):
         data['workflow_node']  = node
         data['workflow_label'] = node.workflow.graph['nodes'].get(node.key, {}).get('label') or node.key
 
+        # Its Workflow has moved on, so (re)starting the Test changes nothing there
+        if node.state in [WorkflowNode.State.FINISHED, WorkflowNode.State.SKIPPED] and not (workload.passed or workload.failed):
+            data['workflow_hint'] = ('%s of Workflow #%d is decided already (%s), so the Workflow ignores this Test from now on. '
+                'Restarting it only spends games.' % (data['workflow_label'], node.workflow.id, node.outcome or node.state.lower()))
+
+        elif node.held:
+            data['workflow_hint'] = 'Paused with Workflow #%d. Resume the Workflow to continue it.' % (node.workflow.id)
+
     # Workers stopped the Workload for a wrong Bench, which it can be restarted with
     data['bench_corrections'] = bench_corrections(workload)
 

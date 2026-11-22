@@ -1,7 +1,7 @@
 // Small line charts as inline SVG, for the SPSA history of a tune and the course of a Ladder.
 //
 //   ob_chart(container, {
-//       series : [ { name, points : [[x, y], ...], color, width, errors : [[low, high], ...], dots } ],
+//       series : [ { name, points : [[x, y], ...], color, width, errors : [[low, high], ...], dots, line : false } ],
 //       x_label, y_label, x_format(x), y_format(y), zero : true,
 //   })
 //
@@ -114,9 +114,12 @@ function ob_chart(container, options) {
             }
         });
 
-        const line = ob_svg('path', { d : path, fill : 'none', stroke : color, 'stroke-width' : series.width || 1.5, opacity : series.opacity || 1 });
-        line.append(ob_svg('title', {}, series.name));
-        svg.append(line);
+        // Series of separate marks, like Tests that were stopped early, have no line
+        if (series.line !== false) {
+            const line = ob_svg('path', { d : path, fill : 'none', stroke : color, 'stroke-width' : series.width || 1.5, opacity : series.opacity || 1 });
+            line.append(ob_svg('title', {}, series.name));
+            svg.append(line);
+        }
     });
 
     container.append(svg);

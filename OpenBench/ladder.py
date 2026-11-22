@@ -289,7 +289,8 @@ def points(ladder):
         if (test := point.test) and not test.deleted:
             lower, elo, upper = OpenBench.stats.Elo(test.results())
             row.update({ 'test' : test.id, 'games' : test.games, 'max_games' : test.max_games, 'finished' : test.finished,
-                         'elo' : elo, 'lower' : lower, 'upper' : upper })
+                         'elo' : elo, 'lower' : lower, 'upper' : upper,
+                         'stopped' : test.finished and test.games < test.max_games }) # Early, by hand or for errors
 
         rows.append(row)
 
