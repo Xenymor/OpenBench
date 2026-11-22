@@ -1245,7 +1245,7 @@ class PassProbabilityTests(TestCase):
         for index in range(30):
             # Pentanomials around +2 Elo, of growing size
             k = 2000 + 100 * index
-            Test.objects.create(author='x', book_name='b', dev=engine, base=engine, test_mode='SPRT', finished=True,
+            Test.objects.create(author='x', book_name='b', dev=engine, base=engine, test_mode='SPRT', finished=True, passed=True,
                                 games=2 * k, LL=k // 20, LD=k // 5, DD=k // 2, DW=k // 5 + k // 100, WW=k // 20)
 
         OpenBench.eta._prior_cache.update(time=0.0, value=None)
@@ -1399,3 +1399,122 @@ class PauseAndReplaceTests(TestCase):
         Test.objects.filter(id=point.test_id).update(finished=True)
         self.client.force_login(self.user)
         self.assertContains(self.client.get('/ladder/%d/' % (created.id)), 'stopped early')
+
+@mock.patch('OpenBench.workloads.verify_workload.collect_github_info', TW.fake_github)
+@mock.patch('OpenBench.workloads.create_workload.run_checks', lambda workload, check_base=False: {})
+@mock.patch('OpenBench.workflows.runner.lookup_commit', TW.fake_commit)
+class SecondReviewTests(TestCase):
+
+    setUp       = TW.RunnerTests.setUp
+    defaults    = TW.RunnerTests.defaults
+    create      = TW.RunnerTests.create
+    nodes       = TW.RunnerTests.nodes
+    finish_sprt = TW.RunnerTests.finish_sprt
+
+    def template(self, name='default', **config):
+        nodes = { 'a' : node('SPRT', dev='$branch', base=config.pop('base', 'main'), **config) }
+        return WorkflowTemplate.objects.create(name=name, author=self.user.username,
+                   graph={ 'defaults' : self.defaults(), 'edges' : [], 'nodes' : nodes })
+
+    def test_one_branch_with_other_options_is_no_self_test(self):
+        template = self.template(base='$branch', dev_options='Threads=4', base_options='Threads=1')
+        workflow, errors = automation.start_template(template, 'feature')
+        self.assertIsNone(errors)
+        self.assertEqual(automation.start_template(self.template('plain', base='$branch'), 'feature')[1],
+                         ['Template plain would test feature against itself (a)'])
+
+    def test_a_failing_new_workflow_leaves_the_running_one_alone(self):
+        template = self.template()
+        first, errors = automation.start_template(template, 'feature')
+        self.assertEqual(first.status, 'RUNNING')
+
+        # The next push fails once its Node starts, so the Workflow is in ATTENTION right away
+        with mock.patch.object(runner, 'create_test', mock.Mock(side_effect=runner.WorkflowError('No Bench'))):
+            second, errors = automation.start_template(template, 'feature')
+        self.assertEqual(second.status, 'ATTENTION')
+        self.assertEqual(second.replaced, [])
+        self.assertEqual(Workflow.objects.get(id=first.id).status, 'RUNNING')
+
+    def test_only_older_workflows_are_replaced(self):
+        template = self.template()
+        first, errors  = automation.start_template(template, 'feature')
+        second, errors = automation.start_template(template, 'feature')
+        self.assertEqual(second.replaced, [first.id])
+
+        # A Workflow that was created after the new one, by a push handled at the same time, stays
+        Workflow.objects.filter(id=first.id).update(status='RUNNING')
+        Workflow.objects.filter(id=second.id).update(status='RUNNING')
+        with mock.patch.object(runner, 'create_workflow', lambda user, name, graph: (Workflow.objects.get(id=first.id), None)):
+            again, errors = automation.start_template(template, 'feature')
+        self.assertEqual(again.replaced, [])
+        self.assertEqual(Workflow.objects.get(id=second.id).status, 'RUNNING')
+
+    def test_attached_tunes_keep_running(self):
+        tune = self.nodes(self.create({ 'defaults' : {}, 'edges' : [], 'nodes' : {
+            'own' : node('SPSA', dev='x', spsa_inputs='A, int, 10, 0, 100, 2, 0.002') } }))['own'].test
+        WorkflowNode.objects.filter(test=tune).update(test=None)
+
+        workflow = self.create({ 'defaults' : {}, 'edges' : [], 'nodes' : {
+            't' : node('SPSA', existing_test=str(tune.id), at_percent='50', spsa_inputs='A, int, 10, 0, 100, 2, 0.002') } })
+        Test.objects.filter(id=tune.id).update(games=20)
+        runner.step(workflow.id)
+
+        self.assertEqual(self.nodes(workflow)['t'].state, 'FINISHED')
+        self.assertFalse(Test.objects.get(id=tune.id).finished)
+
+    def test_merges_with_a_marker_do_not_alarm(self):
+        self.template(base='main')
+        PushEvent.objects.create(delivery='m', repo='https://github.com/Xenymor/Fispur', branch='main', sha='s', message='Merge [ob]')
+        sent = []
+        with mock.patch.object(notifications, 'send', lambda build: sent.extend(build(''))), \
+             mock.patch.object(automation.ladder, 'request_poll'):
+            automation.process_pushes()
+        self.assertEqual(sent, [])
+        self.assertEqual(PushEvent.objects.get().result, 'Template default skipped, since it would test main against itself')
+
+    def test_resume_respects_a_stop_by_hand(self):
+        workflow = self.create({ 'defaults' : {}, 'edges' : [], 'nodes' : { 'a' : node('SPRT', dev='lmr', base='main') } })
+        test     = self.nodes(workflow)['a'].test
+        runner.set_paused(workflow.id, True)
+
+        # Restarted by hand while paused, and then stopped again
+        self.client.force_login(self.user)
+        self.client.get('/test/%d/RESTART/' % (test.id))
+        self.assertFalse(self.nodes(workflow)['a'].held)
+        self.client.get('/test/%d/STOP/' % (test.id))
+
+        runner.set_paused(workflow.id, False)
+        self.assertTrue(Test.objects.get(id=test.id).finished)
+
+    def test_prior_ignores_stopped_tests_and_outliers(self):
+        engine = Engine.objects.create(name='e', source='', sha='a' * 40, bench=1)
+        for index in range(30):
+            k = 2000 + 50 * index
+            Test.objects.create(author='x', book_name='b', dev=engine, base=engine, test_mode='SPRT', finished=True, passed=index % 2 == 0,
+                                failed=index % 2 == 1, games=2 * k, LL=k // 20, LD=k // 5, DD=k // 2, DW=k // 5 + k // 200, WW=k // 20)
+
+        OpenBench.eta._prior_cache.update(time=0.0, value=None)
+        normal = OpenBench.eta.elo_prior()
+
+        # A broken engine, decided at a huge loss, and a stopped Test change nothing
+        Test.objects.create(author='x', book_name='b', dev=engine, base=engine, test_mode='SPRT', finished=True, failed=True,
+                            games=400, LL=190, LD=5, DD=5, DW=0, WW=0)
+        Test.objects.create(author='x', book_name='b', dev=engine, base=engine, test_mode='SPRT', finished=True,
+                            games=400, LL=0, LD=0, DD=5, DW=5, WW=190)
+        OpenBench.eta._prior_cache.update(time=0.0, value=None)
+        self.assertAlmostEqual(OpenBench.eta.elo_prior()[1], normal[1], delta=0.5)
+        OpenBench.eta._prior_cache.update(time=0.0, value=None)
+
+    def test_trinomial_sprts_get_no_probability(self):
+        test = Test(test_mode='SPRT', use_penta=False, use_tri=True, losses=300, draws=600, wins=330, currentllr=1.0,
+                    lowerllr=-2.94, upperllr=2.94, elolower=0.0, eloupper=5.0)
+        self.assertIsNone(OpenBench.eta.pass_probability(test, (0.0, 3.0)))
+
+    def test_pushes_without_commits_still_poke_ladders(self):
+        body = push_payload(branch='release', new=False)
+        with mock.patch.object(automation, 'read_secret', lambda: SECRET), \
+             mock.patch.object(automation.ladder, 'request_poll') as poll:
+            self.client.post('/api/github/push/', body, content_type='application/json',
+                HTTP_X_HUB_SIGNATURE_256=signed(body), HTTP_X_GITHUB_EVENT='push', HTTP_X_GITHUB_DELIVERY='x')
+        poll.assert_called_once_with('https://github.com/Xenymor/Fispur', 'release')
+        self.assertEqual(PushEvent.objects.count(), 0)

@@ -109,6 +109,11 @@ def receive(headers, body):
     # COMMIT Nodes make them, repeats that commit's message, and its marker would start the
     # Template again, for the new branch, which would make a branch of its own, and so on.
     if not data.get('commits') or ref.startswith('refs/heads/%s' % (OWN_BRANCHES)):
+
+        # Ladders of the branch still look at its head, which may have moved, like after a force push
+        if repo := github.normalize_repo((data.get('repository') or {}).get('html_url', '')):
+            ladder.request_poll(repo, ref[len('refs/heads/'):])
+
         return 200, { 'ignored' : 'No new commits on %s' % (ref) }
 
     repo     = github.normalize_repo((data.get('repository') or {}).get('html_url', ''))
@@ -145,6 +150,27 @@ def instantiate(template, branch):
 def template_repo(graph):
     return github.normalize_repo((graph.get('defaults') or {}).get('dev_repo', ''))
 
+def tests_itself(graph):
+
+    # Keys of the SPRTs that would test an engine against the very same engine: the same branch,
+    # in the same repository, with the same options, Network and time control. A marker that
+    # reaches the branch the Template tests against, for example through the message of a merge,
+    # does that, which can never tell anything. Other differences, like Threads, are fine.
+    defaults, same = graph.get('defaults', {}), []
+
+    def side(config, name):
+        return (str(config.get(name, '')).strip(), str(defaults.get('%s_repo' % (name), '')),
+                str(defaults.get('%s_options' % (name), '')) + '|' + str(config.get('%s_options' % (name), '')),
+                str(defaults.get('%s_network' % (name), '')) + '|' + str(config.get('%s_network' % (name), '')),
+                str(defaults.get('%s_time_control' % (name), '')), str(config.get('%s_bench' % (name), '')))
+
+    for key, node in graph['nodes'].items():
+        config = node.get('config', {})
+        if node.get('kind') == 'SPRT' and not config.get('existing_test') and side(config, 'dev') == side(config, 'base'):
+            same.append(key)
+
+    return sorted(same)
+
 def start_template(template, branch):
 
     # (Workflow, None) or (None, errors). Imported late, since the runner pulls in the views.
@@ -153,12 +179,9 @@ def start_template(template, branch):
     if not (user := User.objects.filter(username=template.author).first()):
         return None, ['The author of Template %s no longer exists' % (template.name)]
 
-    # A marker that reaches the branch the Template tests against, for example through the
-    # message of a merge, would test that branch against itself, which can never tell anything
     graph = instantiate(template, branch)
-    if same := [key for key, node in graph['nodes'].items() if node.get('kind') == 'SPRT'
-                and str(node.get('config', {}).get('dev', '')).strip() == str(node.get('config', {}).get('base', '')).strip()]:
-        return None, ['Template %s would test %s against itself (%s)' % (template.name, branch, ', '.join(sorted(same)))]
+    if same := tests_itself(graph):
+        return None, ['Template %s would test %s against itself (%s)' % (template.name, branch, ', '.join(same))]
 
     name = ('%s: %s' % (template.name, branch))[:128]
     workflow, errors = runner.create_workflow(user, name, graph)
@@ -167,13 +190,18 @@ def start_template(template, branch):
         return None, errors
 
     # Only the newest one runs: the older Workflows of the Template for the branch are aborted,
-    # which stops their Tests. Only once the new one exists, so that a failed push loses nothing.
+    # which stops their Tests. Only once the new one got going, so that a push whose Nodes fail
+    # at once, for example without a Bench, leaves the running one alone. Only older ones, by
+    # their id, so that two pushes handled at the same time never abort each other.
     from OpenBench.models import Workflow
     Workflow.objects.filter(id=workflow.id).update(template=template.name, branch=branch[:256])
-    older = Workflow.objects.filter(template=template.name, branch=branch[:256]).exclude(id=workflow.id)
-    for previous in older.exclude(status__in=[Workflow.Status.FINISHED, Workflow.Status.ABORTED]):
-        runner.abort(previous.id, 'OpenBench')
-        workflow.replaced = getattr(workflow, 'replaced', []) + [previous.id]
+    workflow.replaced = []
+
+    if workflow.status != Workflow.Status.ATTENTION:
+        older = Workflow.objects.filter(template=template.name, branch=branch[:256], id__lt=workflow.id)
+        for previous in older.exclude(status__in=[Workflow.Status.FINISHED, Workflow.Status.ABORTED]):
+            runner.abort(previous.id, 'OpenBench')
+            workflow.replaced.append(previous.id)
 
     return workflow, None
 
@@ -197,6 +225,11 @@ def handle(event):
 
         if template_repo(template.graph) != github.normalize_repo(event.repo):
             results.append('Template %s is for another repository' % (template.name))
+            continue
+
+        # For example the base branch, after a MERGE brought a commit with a marker into it
+        if tests_itself(instantiate(template, event.branch)):
+            results.append('Template %s skipped, since it would test %s against itself' % (template.name, event.branch))
             continue
 
         workflow, errors = start_template(template, event.branch)

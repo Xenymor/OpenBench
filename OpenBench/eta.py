@@ -136,7 +136,7 @@ def typical_seconds(mode, time_control, games=None):
 # strong patches are: normal, with the mean and spread of the Elo of earlier SPRTs, after taking
 # out their own noise, see elo_prior(). The probability is averaged over the resulting posterior.
 # Simulated SPRTs with OpenBench's own LLR confirm that the probabilities are calibrated.
-# Trinomial Tests are treated alike, with games in place of pairs.
+# Trinomial SPRTs, which use BayesElo, get no probability.
 
 MIN_PAIRS   = 100        # Before which the spread of the scores is too uncertain
 GRID_STEPS  = 121        # Points of the average over the true t-value, within 6 standard deviations
@@ -152,17 +152,29 @@ def elo_prior():
     # (mean, spread) of the true Elo of recent SPRTs: the spread of their measured Elo, less
     # the part that their own noise explains. Cached, since every running SPRT on a page needs it.
     import time
+    from django.db.models import Q
     from OpenBench.models import Test
     from OpenBench.stats import Elo
 
     if _prior_cache['value'] and time.time() - _prior_cache['time'] < PRIOR_TTL:
         return _prior_cache['value']
 
-    measured, noise = [], []
-    for test in Test.objects.filter(test_mode='SPRT', finished=True, deleted=False, games__gte=2 * MIN_PAIRS).order_by('-id')[:PRIOR_TESTS]:
+    # Only SPRTs that were decided: stopped ones, by hand, for errors, or by a newer push, measured
+    # too little. One broken engine of -1000 Elo must not swamp the spread either, so values far
+    # from the median, by its absolute deviation, are left out.
+    decided = Test.objects.filter(Q(passed=True) | Q(failed=True), test_mode='SPRT', deleted=False, games__gte=2 * MIN_PAIRS)
+    results = []
+    for test in decided.order_by('-id')[:PRIOR_TESTS]:
         lower, elo, upper = Elo(test.results())
-        measured.append(elo)
-        noise.append(((upper - lower) / 3.92) ** 2) # The 95% interval spans 3.92 standard deviations
+        results.append((elo, ((upper - lower) / 3.92) ** 2)) # The 95% interval spans 3.92 standard deviations
+
+    if results:
+        median    = statistics.median(elo for elo, var in results)
+        deviation = statistics.median(abs(elo - median) for elo, var in results) * 1.4826
+        results   = [(elo, var) for elo, var in results if abs(elo - median) <= max(5 * deviation, 2 * PRIOR_MIN)]
+
+    measured = [elo for elo, var in results]
+    noise    = [var for elo, var in results]
 
     value = PRIOR
     if len(measured) >= 20:
@@ -199,10 +211,11 @@ def pass_probability(test, prior=None):
     if test.finished:
         return 1.0 if test.passed else 0.0 if test.failed else None
 
-    if test.use_penta:
-        counts, scores, scale = test.as_penta(), [0.0, 0.25, 0.5, 0.75, 1.0], math.sqrt(2)
-    else:
-        counts, scores, scale = test.as_tri(), [0.0, 0.5, 1.0], 1.0
+    # Trinomial SPRTs measure BayesElo with a fitted draw Elo, which this model does not describe
+    if not test.use_penta:
+        return None
+
+    counts, scores, scale = test.as_penta(), [0.0, 0.25, 0.5, 0.75, 1.0], math.sqrt(2)
 
     n = sum(counts)
     if n < MIN_PAIRS:

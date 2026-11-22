@@ -624,7 +624,8 @@ def stop_finished_tune(workflow, node, test):
 
     # A tune that is done at its "Done at %" would otherwise play on to its full length, for
     # values that the Workflow has frozen already. Stopped right away, so the workers move on.
-    if test.finished:
+    # A tune that was attached as an existing Test was started by the user, and keeps running.
+    if test.finished or workflow.graph['nodes'][node.key].get('config', {}).get('existing_test'):
         return
 
     Test.objects.filter(id=test.id).update(finished=True)
@@ -926,8 +927,8 @@ def release_tests(workflow, username):
         node.held = False
         node.save(update_fields=['held'])
 
-        # Unless decided or deleted meanwhile. The time it was held does not count towards its speed.
-        if node.test and not (node.test.passed or node.test.failed or node.test.deleted):
+        # Unless decided, deleted, or running again meanwhile. The time it was held does not count towards its speed.
+        if node.test and node.test.finished and not (node.test.passed or node.test.failed or node.test.deleted):
             Test.objects.filter(id=node.test.id).update(finished=False, rate_updated=None)
             LogEvent.objects.create(author=username, summary='RESUME Workflow #%d' % (workflow.id), log_file='', test_id=node.test.id)
 
